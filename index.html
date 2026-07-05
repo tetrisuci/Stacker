@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TETR.IO Stacking Trainer — dev</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        font-family: system-ui, sans-serif;
+        background: #0e1116;
+        color: #c9d1d9;
+      }
+      main {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        padding: 20px;
+      }
+      .stage {
+        display: flex;
+        gap: 24px;
+        align-items: flex-start;
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+      /* Boards top-align so the YOU and PRO playfields line up, regardless of
+         the extra content (status/comparison) that hangs below the YOU board.
+         The stats panel keeps its own bottom alignment (see #stats-root). */
+      .board-group {
+        display: flex;
+        gap: 24px;
+        align-items: flex-start;
+        position: relative;
+      }
+      .play-col {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+      .board-title {
+        font-size: 0.85rem;
+        letter-spacing: 0.14em;
+        font-weight: 700;
+        color: #8b949e;
+      }
+      /* Pro-board title before a replay is loaded (or after a session ends):
+         a dimmed placeholder instead of a player name. */
+      .board-title.placeholder {
+        color: #6e7681;
+        font-weight: 500;
+        font-style: italic;
+        letter-spacing: 0.04em;
+      }
+      .board-info {
+        font-size: 0.82rem;
+        color: #8b949e;
+        font-variant-numeric: tabular-nums;
+        min-height: 1.1em;
+      }
+      canvas {
+        display: block;
+        border-radius: 6px;
+        outline: none;
+      }
+      canvas:focus {
+        box-shadow: 0 0 0 2px #4b6cf3;
+      }
+      p {
+        margin: 0;
+        max-width: 40rem;
+        text-align: center;
+        color: #8b949e;
+        font-size: 0.9rem;
+      }
+      .status {
+        min-height: 1.2em;
+        font-size: 0.9rem;
+        color: #f5a742;
+        font-weight: 600;
+      }
+      code {
+        color: #c9d1d9;
+      }
+
+      /* ---- live stats panel (Pieces/PPS, Attack/APM) ---- */
+      /* The stats sit to the left of the YOU playfield and bottom-align with it,
+         matching TETR.IO. They are absolutely positioned so they don't consume
+         layout width — otherwise the YOU canvas would shift right and no longer
+         line up with the PRO canvas. `right: 100%` places them just left of the
+         canvas; `bottom: 0` aligns them to the playfield's bottom edge. */
+      .board-with-stats {
+        position: relative;
+        display: flex;
+      }
+      #stats-root {
+        position: absolute;
+        right: 100%;
+        bottom: 0;
+        margin-right: 4px;
+      }
+      .stats-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        text-align: right;
+        min-width: 130px;
+      }
+      .stat-row {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+      }
+      .stat-label {
+        font-size: 0.72rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #8b949e;
+      }
+      .stat-values {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        font-variant-numeric: tabular-nums;
+      }
+      .stat-value {
+        font-size: 2rem;
+        font-weight: 700;
+        color: #e6edf3;
+        line-height: 1;
+      }
+      .stat-rate {
+        font-size: 0.85rem;
+        color: #8b949e;
+      }
+      .stat-rate-label {
+        display: block;
+        font-size: 0.6rem;
+        letter-spacing: 0.14em;
+        color: #6e7681;
+      }
+
+      /* ---- settings panel ---- */
+      .settings {
+        width: 300px;
+        background: #161b22;
+        border: 1px solid #2b3240;
+        border-radius: 8px;
+        padding: 16px;
+        text-align: left;
+      }
+      .settings h2 {
+        margin: 0;
+        font-size: 1.1rem;
+      }
+      .settings h3 {
+        margin: 0 0 8px;
+        font-size: 0.8rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #8b949e;
+      }
+      .settings-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 12px;
+      }
+      .settings-section {
+        border-top: 1px solid #2b3240;
+        padding-top: 12px;
+        margin-top: 12px;
+      }
+      .section-help {
+        font-size: 0.78rem;
+        color: #6e7681;
+        margin-bottom: 10px;
+        text-align: left;
+      }
+      .gravity-presets {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 14px;
+        margin-bottom: 10px;
+      }
+      .gravity-option {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 0.85rem;
+        color: #c9d1d9;
+        cursor: pointer;
+      }
+      .gravity-option input {
+        accent-color: #4b6cf3;
+        cursor: pointer;
+      }
+      .field {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+      .field label {
+        display: flex;
+        flex-direction: column;
+      }
+      .field-label {
+        font-size: 0.9rem;
+        color: #c9d1d9;
+      }
+      .field-help {
+        font-size: 0.72rem;
+        color: #6e7681;
+      }
+      .field-control {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .field-control input[type="range"] {
+        width: 110px;
+      }
+      .field-number-wrap {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+      }
+      .field-number {
+        width: 48px;
+        background: #0e1116;
+        color: #c9d1d9;
+        border: 1px solid #2b3240;
+        border-radius: 4px;
+        padding: 3px 4px;
+        font-variant-numeric: tabular-nums;
+      }
+      .field-unit {
+        font-size: 0.72rem;
+        color: #6e7681;
+        width: 14px;
+      }
+      .keybind {
+        margin-bottom: 6px;
+      }
+      .bind-btn {
+        min-width: 96px;
+        background: #0e1116;
+        color: #c9d1d9;
+        border: 1px solid #2b3240;
+        border-radius: 4px;
+        padding: 5px 8px;
+        cursor: pointer;
+        font-size: 0.85rem;
+      }
+      .bind-btn:hover {
+        border-color: #4b6cf3;
+      }
+      .bind-btn.listening {
+        border-color: #f5d442;
+        color: #f5d442;
+        animation: pulse 1s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        50% {
+          opacity: 0.6;
+        }
+      }
+      .reset-btn {
+        background: transparent;
+        color: #8b949e;
+        border: 1px solid #2b3240;
+        border-radius: 4px;
+        padding: 5px 10px;
+        cursor: pointer;
+        font-size: 0.8rem;
+      }
+      .reset-btn:hover {
+        color: #f34b4b;
+        border-color: #f34b4b;
+      }
+
+      /* ---- replay loader + metadata ---- */
+      .side-col {
+        display: flex;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        gap: 16px;
+      }
+      /* The React mount wrappers pass through so their panels (replay, settings,
+         controls) are direct flex items of .side-col and lay out horizontally. */
+      #replay-root,
+      #settings-root {
+        display: contents;
+      }
+      .replay {
+        width: 300px;
+        background: #161b22;
+        border: 1px solid #2b3240;
+        border-radius: 8px;
+        padding: 16px;
+        text-align: left;
+      }
+      .replay h3 {
+        margin: 0 0 10px;
+        font-size: 0.8rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #8b949e;
+      }
+      .dropzone {
+        border: 1px dashed #2b3240;
+        border-radius: 6px;
+        padding: 16px;
+        text-align: center;
+        color: #8b949e;
+        transition: border-color 0.15s, background 0.15s;
+      }
+      .dropzone.over {
+        border-color: #4b6cf3;
+        background: #0e1116;
+      }
+      .dropzone p {
+        margin: 0 0 6px;
+      }
+      .file-label {
+        color: #4b6cf3;
+        cursor: pointer;
+        font-size: 0.85rem;
+      }
+      .file-label input {
+        display: none;
+      }
+      .replay-error {
+        color: #f34b4b;
+        font-size: 0.85rem;
+        margin-top: 10px;
+      }
+      .replay-ok {
+        color: #4bf35f;
+        font-size: 0.85rem;
+        margin-top: 10px;
+      }
+      .replay-unsupported {
+        color: #f5a742;
+        font-size: 0.85rem;
+        margin-top: 10px;
+        line-height: 1.4;
+      }
+      /* Caption for approximate (partial-support) reconstructions, e.g. Zenith. */
+      .replay-partial {
+        color: #f5a742;
+        font-size: 0.8rem;
+        margin-top: 10px;
+        line-height: 1.4;
+        border: 1px solid rgba(245, 167, 66, 0.35);
+        border-radius: 6px;
+        padding: 8px 10px;
+      }
+      .replay-meta dl {
+        margin: 12px 0 0;
+      }
+      .meta-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 3px 0;
+        border-bottom: 1px solid #1c2230;
+        font-size: 0.85rem;
+      }
+      .meta-row dt {
+        color: #8b949e;
+      }
+      .meta-row dd {
+        margin: 0;
+        color: #c9d1d9;
+        font-variant-numeric: tabular-nums;
+      }
+      .replay-warnings {
+        margin: 10px 0 0;
+        padding-left: 0;
+        list-style: none;
+        color: #f5a742;
+        font-size: 0.78rem;
+      }
+      .replay-warnings li {
+        margin-bottom: 4px;
+      }
+
+      /* ---- reconstruction stepper ---- */
+      .stepper {
+        margin-top: 12px;
+      }
+      .stepper-controls {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin: 10px 0 8px;
+      }
+      .stepper-controls button {
+        background: #0e1116;
+        color: #c9d1d9;
+        border: 1px solid #2b3240;
+        border-radius: 4px;
+        padding: 4px 8px;
+        cursor: pointer;
+        font-size: 0.8rem;
+      }
+      .stepper-controls button:hover:not(:disabled) {
+        border-color: #4b6cf3;
+      }
+      .stepper-controls button:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      .stepper-pos {
+        font-variant-numeric: tabular-nums;
+        font-size: 0.85rem;
+        min-width: 64px;
+        text-align: center;
+        color: #c9d1d9;
+      }
+      .stepper-slider {
+        width: 100%;
+        margin-bottom: 8px;
+      }
+      .stepper-info {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 12px;
+        font-size: 0.8rem;
+        color: #8b949e;
+        font-variant-numeric: tabular-nums;
+      }
+      .stepper-exit {
+        margin-top: 10px;
+        width: 100%;
+        background: transparent;
+        color: #8b949e;
+        border: 1px solid #2b3240;
+        border-radius: 4px;
+        padding: 5px;
+        cursor: pointer;
+        font-size: 0.8rem;
+      }
+      .stepper-exit:hover {
+        border-color: #4b6cf3;
+        color: #c9d1d9;
+      }
+
+      /* ---- training session (dual-board window) ---- */
+      .session {
+        margin-top: 14px;
+        border-top: 1px solid #2b3240;
+        padding-top: 12px;
+      }
+      .session-title {
+        margin: 0 0 6px;
+        font-size: 0.85rem;
+        color: #c9d1d9;
+      }
+      .session-field {
+        margin: 8px 0;
+      }
+      .session-field label {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        font-size: 0.82rem;
+        color: #8b949e;
+        margin-bottom: 3px;
+      }
+      .session-field label b {
+        color: #c9d1d9;
+        font-variant-numeric: tabular-nums;
+      }
+      .session-frame {
+        margin-left: auto;
+        font-size: 0.72rem;
+        color: #6e7681;
+      }
+      .session-field input[type="range"] {
+        width: 100%;
+      }
+      .session-window {
+        font-size: 0.8rem;
+        color: #8b949e;
+        margin: 6px 0 10px;
+        font-variant-numeric: tabular-nums;
+      }
+      .session-start,
+      .session-end {
+        width: 100%;
+        border-radius: 4px;
+        padding: 7px;
+        cursor: pointer;
+        font-size: 0.88rem;
+        font-weight: 600;
+      }
+      .session-start {
+        background: #1f6f3f;
+        color: #e6ffe6;
+        border: 1px solid #2ea043;
+      }
+      .session-start:hover {
+        background: #2ea043;
+      }
+      .session-end {
+        background: transparent;
+        color: #f5a742;
+        border: 1px solid #f5a742;
+      }
+      .session-end:hover {
+        background: rgba(245, 167, 66, 0.12);
+      }
+
+      /* ---- "stack like the pro" comparison ---- */
+      /* The two boards sit side by side at a normal gap; the comparison panel is
+         absolutely positioned in the empty middle strip between the playfields,
+         anchored near their bottom edge — below where the left board's NEXT
+         queue ends, so it doesn't cover it. Being out of flow, it reserves no
+         width, keeping the boards close enough to fit the viewport. */
+      .board-area {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+      #comparison-root {
+        position: absolute;
+        left: 50%;
+        bottom: 40px;
+        transform: translateX(-50%);
+      }
+      /* When no session is active the React root is empty; hide it entirely. */
+      #comparison-root:empty {
+        display: none;
+      }
+      .compare {
+        width: 240px;
+        background: #161b22;
+        border: 1px solid #2b3240;
+        border-radius: 8px;
+        padding: 12px 14px;
+        text-align: left;
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+      }
+      .compare h3 {
+        margin: 0 0 8px;
+        font-size: 0.8rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #8b949e;
+      }
+      .compare-stats {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+      }
+      .compare-accuracy {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: #4bf3d6;
+        font-variant-numeric: tabular-nums;
+      }
+      .compare-count {
+        font-size: 0.82rem;
+        color: #8b949e;
+        font-variant-numeric: tabular-nums;
+      }
+      .compare-diverged {
+        font-size: 0.8rem;
+        color: #f5a742;
+        margin: 6px 0 0;
+      }
+      .compare-mismatch {
+        margin-top: 10px;
+        border-top: 1px solid #2b3240;
+        padding-top: 10px;
+      }
+      .compare-mismatch p {
+        margin: 0 0 8px;
+        font-size: 0.82rem;
+        color: #f34b4b;
+      }
+      .retry-btn {
+        width: 100%;
+        background: #1f4b6f;
+        color: #cfe8ff;
+        border: 1px solid #2f6faf;
+        border-radius: 4px;
+        padding: 6px;
+        cursor: pointer;
+        font-size: 0.86rem;
+        font-weight: 600;
+      }
+      .retry-btn:hover {
+        background: #2f6faf;
+      }
+      .compare-verdict {
+        margin: 0 0 8px;
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: #4bf35f;
+      }
+      .compare-summary dl {
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>TETR.IO Stacking Trainer</h1>
+      <div class="stage">
+        <div class="board-area">
+          <div class="board-group">
+            <!-- Learner board (left) — you play here. -->
+            <div class="play-col">
+              <div class="board-title" id="learner-title">YOU</div>
+              <!-- Stats sit left of the board and bottom-align to the playfield,
+                   matching TETR.IO's layout. -->
+              <div class="board-with-stats">
+                <div id="stats-root"></div>
+                <canvas id="board" tabindex="0"></canvas>
+              </div>
+              <p id="learner-info" class="board-info"></p>
+              <p id="status" class="status"></p>
+            </div>
+            <!-- Pro board (right) — always visible; shows an empty board until a
+                 replay is loaded and a training session begins. -->
+            <div class="play-col pro-col" id="pro-col">
+              <div class="board-title placeholder" id="pro-title">No replay selected</div>
+              <canvas id="board-pro"></canvas>
+              <p id="pro-info" class="board-info"></p>
+            </div>
+          </div>
+          <!-- Comparison feedback sits on its own row below the boards, so it
+               never overlaps either board's queue or playfield. -->
+          <div id="comparison-root"></div>
+        </div>
+        <div class="side-col">
+          <div id="replay-root"></div>
+          <div id="settings-root"></div>
+        </div>
+      </div>
+    </main>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
