@@ -7,8 +7,7 @@ import {
   countHoles,
   bumpiness,
   boardMetrics,
-  accumulate,
-  initialDivergence,
+  computeDivergence,
   summarize,
   type PlacementRecord,
 } from "./compare";
@@ -153,32 +152,61 @@ describe("board metrics", () => {
   });
 });
 
-describe("divergence accumulation + summary", () => {
+describe("computeDivergence + summary", () => {
   const match = { match: true } as any;
   const miss = { match: false } as any;
 
-  it("accumulates matched count and first divergence", () => {
-    let s = initialDivergence();
-    s = accumulate(s, 10, match);
-    s = accumulate(s, 11, miss); // first divergence at 11
-    s = accumulate(s, 12, miss);
+  it("counts matched pieces and the first (smallest-index) divergence", () => {
+    const s = computeDivergence([
+      { index: 10, result: match },
+      { index: 11, result: miss }, // first divergence at 11
+      { index: 12, result: miss },
+    ]);
     expect(s.compared).toBe(3);
     expect(s.matched).toBe(1);
     expect(s.firstDivergence).toBe(11);
   });
 
   it("stays null when everything matches", () => {
-    let s = initialDivergence();
-    s = accumulate(s, 0, match);
-    s = accumulate(s, 1, match);
+    const s = computeDivergence([
+      { index: 0, result: match },
+      { index: 1, result: match },
+    ]);
     expect(s.firstDivergence).toBeNull();
     expect(s.matched).toBe(2);
   });
 
+  it("takes the smallest mismatched index regardless of input order", () => {
+    // Deriving from a set (not folding in order) must still pin firstDivergence
+    // to the lowest mismatched index even if results arrive out of order.
+    const s = computeDivergence([
+      { index: 5, result: miss },
+      { index: 3, result: miss },
+      { index: 4, result: match },
+    ]);
+    expect(s.firstDivergence).toBe(3);
+  });
+
+  it("does not double-count a re-placed (deduped) piece", () => {
+    // The session stores results in a Map keyed by index; a retried piece
+    // overwrites its entry, so computeDivergence only ever sees one result per
+    // index. A corrected retry therefore yields 1/1, not 1/2.
+    const results = new Map<number, any>();
+    results.set(0, miss); // first (wrong) attempt
+    results.set(0, match); // retry, corrected — overwrites
+    const s = computeDivergence(
+      [...results].map(([index, result]) => ({ index, result })),
+    );
+    expect(s.compared).toBe(1);
+    expect(s.matched).toBe(1);
+    expect(s.firstDivergence).toBeNull(); // no longer diverged
+  });
+
   it("summarizes with holes/bumpiness deltas vs the pro", () => {
-    let s = initialDivergence();
-    s = accumulate(s, 0, match);
-    s = accumulate(s, 1, miss);
+    const s = computeDivergence([
+      { index: 0, result: match },
+      { index: 1, result: miss },
+    ]);
     // learner has a hole and more bumpiness than the pro's flat board.
     const learner = grid(["#", ".", "#"]); // 1 hole, heights [3]
     const pro = grid(["#", "#", "#"]); // 0 holes

@@ -181,20 +181,37 @@ export const initialDivergence = (): DivergenceState => ({
   firstDivergence: null,
 });
 
-/** Fold a comparison result into the running divergence state (pure). */
-export function accumulate(
-  state: DivergenceState,
-  pieceIndex: number,
-  result: MatchResult,
+/** A single placement's comparison result tagged with its absolute pro index. */
+export interface IndexedMatch {
+  index: number;
+  result: MatchResult;
+}
+
+/**
+ * Compute the divergence state from the placements currently on the board (pure).
+ *
+ * This is a *derivation*, not an accumulator: it is recomputed from the current
+ * set of results every time, so undo, redo, and retry (which overwrite or drop a
+ * placement's result) are reflected correctly. A stateful fold that only ever
+ * added would double-count a retried piece and latch `firstDivergence` on a
+ * mismatch even after the piece was corrected.
+ *
+ * `matches` need not be sorted; `firstDivergence` is the smallest index whose
+ * result did not match.
+ */
+export function computeDivergence(
+  matches: readonly IndexedMatch[],
 ): DivergenceState {
-  return {
-    compared: state.compared + 1,
-    matched: state.matched + (result.match ? 1 : 0),
-    firstDivergence:
-      state.firstDivergence === null && !result.match
-        ? pieceIndex
-        : state.firstDivergence,
-  };
+  let matched = 0;
+  let firstDivergence: number | null = null;
+  for (const { index, result } of matches) {
+    if (result.match) {
+      matched++;
+    } else if (firstDivergence === null || index < firstDivergence) {
+      firstDivergence = index;
+    }
+  }
+  return { compared: matches.length, matched, firstDivergence };
 }
 
 export interface WindowSummary {

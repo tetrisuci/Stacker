@@ -469,9 +469,9 @@ describe("TrainingSession stack-like-the-pro comparison", () => {
       board: pro.snapshot.board.map((row) => row.map((c) => c != null)),
     };
     const match = session.recordLearnerPlacement(learnerPlacement, idx);
-    expect(match.match).toBe(true);
-    expect(session.divergenceState().matched).toBe(1);
-    expect(session.divergenceState().firstDivergence).toBeNull();
+    expect(match?.match).toBe(true);
+    // The result is stored under its pro index for later derivation/redo.
+    expect(session.matchResultAt(idx)?.match).toBe(true);
   });
 
   it("flags a divergence and records the first divergence index", () => {
@@ -494,8 +494,8 @@ describe("TrainingSession stack-like-the-pro comparison", () => {
       ),
     };
     const match = session.recordLearnerPlacement(wrong, idx);
-    expect(match.match).toBe(false);
-    expect(session.divergenceState().firstDivergence).toBe(idx);
+    expect(match?.match).toBe(false);
+    expect(session.matchResultAt(idx)?.match).toBe(false);
     expect(session.lastMatchResult()?.match).toBe(false);
   });
 
@@ -562,6 +562,107 @@ describe("TrainingSession stack-like-the-pro comparison", () => {
     const redone = session.syncLastMatch();
     expect(redone).toEqual(firstResult);
     expect(redone?.match).toBe(false);
+  });
+
+  // Wire main.tsx's capture-at-lock flow onto a learner so real placements are
+  // compared and stored, exactly as production does.
+  function wireCapture(
+    session: TrainingSession,
+    learner: ReturnType<typeof buildProEngine>,
+  ): void {
+    let pending: { piece: string; x: number; y: number; rot: number } | null =
+      null;
+    let pendingIdx = 0;
+    learner.events.on("falling.lock.pre", () => {
+      const f = learner.falling;
+      pending = {
+        piece: String(f.symbol),
+        x: Math.floor(f.location[0]),
+        y: Math.floor(f.location[1]),
+        rot: f.rotation,
+      };
+      pendingIdx = session.currentTargetIndex();
+    });
+    learner.events.on("falling.lock", (res: { spin: string; lines: number }) => {
+      if (!pending) return;
+      session.recordLearnerPlacement(
+        {
+          ...pending,
+          spin: res.spin,
+          clears: res.lines,
+          board: learner.snapshot().board.map((row) => row.map((c) => c != null)),
+        },
+        pendingIdx,
+      );
+      pending = null;
+    });
+  }
+
+  it("does not double-count divergence when a mismatched piece is retried", () => {
+    const { replay, result } = loadTrack();
+    const learner = buildProEngine(replay, { can_undo: true, can_retry: true });
+    const session = TrainingSession.start(result.track, { start: 0, end: 10 }, learner);
+    wireCapture(session, learner);
+
+    // Misplace the first piece (shove left), producing a mismatch.
+    learner.press("moveLeft");
+    for (let i = 0; i < 5; i++) learner.tick([]);
+    learner.press("hardDrop");
+    learner.tick([]);
+    expect(session.matchResultAt(0)?.match).toBe(false);
+    expect(session.divergenceState()).toEqual({
+      compared: 1,
+      matched: 0,
+      firstDivergence: 0,
+    });
+
+    // Retry: undo the mistake (the piece drops out of the derivation) …
+    session.undo(learner);
+    expect(session.divergenceState().compared).toBe(0);
+
+    // … then place the piece exactly where the pro put it. The real lock flow
+    // re-records index 0, overwriting matchHistory[0] with a match.
+    const pro = result.track[0];
+    const learnerX = Math.floor(learner.falling.location[0]);
+    const dx = pro.x - learnerX;
+    for (let i = 0; i < Math.abs(dx); i++) {
+      learner.press(dx > 0 ? "moveRight" : "moveLeft");
+      learner.tick([]);
+    }
+    while (learner.falling.rotation !== pro.rot) {
+      learner.press("rotateCW");
+      learner.tick([]);
+    }
+    learner.press("hardDrop");
+    learner.tick([]);
+
+    const d = session.divergenceState();
+    // Exactly one piece on the board — the retry must NOT leave compared:2.
+    expect(d.compared).toBe(1);
+    // It landed on the pro's spot, so it matches and no divergence remains.
+    expect(session.matchResultAt(0)?.match).toBe(true);
+    expect(d.matched).toBe(1);
+    expect(d.firstDivergence).toBeNull();
+  });
+
+  it("ignores placements made after the window is complete", () => {
+    const { replay, result } = loadTrack();
+    const learner = buildProEngine(replay, { can_undo: true, can_retry: true });
+    // A 2-piece window; the learner keeps stacking past it.
+    const session = TrainingSession.start(result.track, { start: 0, end: 1 }, learner);
+    wireCapture(session, learner);
+
+    for (let i = 0; i < 5; i++) {
+      learner.press("hardDrop");
+      learner.tick([]);
+    }
+    expect(session.learnerPiecesPlaced()).toBe(5);
+    const d = session.divergenceState();
+    // Only the 2 in-window pieces are ever compared, no matter how many extra
+    // pieces were placed afterward.
+    expect(d.compared).toBeLessThanOrEqual(2);
+    expect(session.matchResultAt(2)).toBeNull(); // piece past the window: never recorded
+    expect(session.matchResultAt(5)).toBeNull();
   });
 
   it("summarizes the window with match stats and holes/bumpiness deltas", () => {

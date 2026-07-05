@@ -11,12 +11,12 @@
 import type { Engine, EngineSnapshot } from "../engine/adapter";
 import type { GarbageEvent, Placement } from "../replay/reconstruct";
 import {
-  accumulate,
   comparePlacement,
-  initialDivergence,
+  computeDivergence,
   summarize,
   toOccupancy,
   type DivergenceState,
+  type IndexedMatch,
   type MatchResult,
   type PlacementRecord,
   type WindowSummary,
@@ -65,8 +65,6 @@ export class TrainingSession {
   private garbageSchedule: GarbageEvent[];
   /** Index into `garbageSchedule` of the next un-inserted garbage event. */
   private nextGarbage = 0;
-  /** Running "stack like the pro" divergence state. */
-  private divergence: DivergenceState = initialDivergence();
   /** The last comparison result (for the retry prompt), or null. */
   private lastMatch: MatchResult | null = null;
   /**
@@ -302,16 +300,25 @@ export class TrainingSession {
 
   /**
    * Compare a just-placed learner piece against the pro's placement at the same
-   * index, accumulate the running divergence, and return the match result.
-   * `atIndex` is the absolute pro index this placement corresponds to (i.e. the
-   * index *before* the placement advanced the count).
+   * index and store the result, keyed by the absolute pro index. `atIndex` is
+   * that index (captured at `falling.lock.pre`, before the count advanced).
+   *
+   * Storing into `matchHistory` — rather than folding into a running counter —
+   * is what makes retry correct: re-placing a piece overwrites its entry, and
+   * `divergenceState()` derives the stats fresh from the on-board placements, so
+   * a corrected retry no longer double-counts or leaves a stale first-divergence.
+   *
+   * Placements past the window end are ignored: the learner may keep stacking
+   * after the window is complete, but those pieces have no pro counterpart to
+   * compare against and must not corrupt the finished window's stats. Returns
+   * null in that case.
    */
   recordLearnerPlacement(
     learnerPlacement: PlacementRecord,
     atIndex: number,
-  ): MatchResult {
-    const idx = clamp(atIndex, this.window.start, this.window.end);
-    const pro = this.track[idx];
+  ): MatchResult | null {
+    if (atIndex < this.window.start || atIndex > this.window.end) return null;
+    const pro = this.track[atIndex];
     const proRecord: PlacementRecord = {
       piece: pro.piece,
       x: pro.x,
@@ -322,9 +329,8 @@ export class TrainingSession {
       board: toOccupancy(pro.snapshot.board),
     };
     const result = comparePlacement(learnerPlacement, proRecord);
-    this.divergence = accumulate(this.divergence, idx, result);
     this.lastMatch = result;
-    this.matchHistory.set(idx, result);
+    this.matchHistory.set(atIndex, result);
     return result;
   }
 
@@ -353,31 +359,41 @@ export class TrainingSession {
   }
 
   /**
-   * The pro index the piece that is *currently locking* corresponds to. Call
-   * this from the `falling.lock.pre` handler: the session's own counter
+   * The absolute pro index the piece that is *currently locking* corresponds to.
+   * Call this from the `falling.lock.pre` handler: the session's own counter
    * increments on `falling.lock` (which fires after `.pre`), so at `.pre` time
    * `placed` still excludes the locking piece — making it the piece at
    * `start + placed`.
+   *
+   * NOT clamped to the window: when the learner keeps stacking past the window
+   * end this returns an index > `window.end`, so `recordLearnerPlacement` can
+   * recognise the placement as out-of-window and skip it rather than mis-attribute
+   * it to the final pro piece.
    */
   currentTargetIndex(): number {
-    return clamp(
-      this.window.start + this.placed,
-      this.window.start,
-      this.window.end,
-    );
+    return this.window.start + this.placed;
   }
 
+  /**
+   * The running "stack like the pro" divergence, derived fresh from the results
+   * of the pieces currently on the learner's board (indices `start … start +
+   * placed - 1`). Deriving — rather than accumulating — means undo, redo, and
+   * retry are all reflected automatically: a re-placed piece overwrote its entry
+   * in `matchHistory`, and undone pieces fall outside the on-board range.
+   */
   divergenceState(): DivergenceState {
-    return this.divergence;
+    const onBoard: IndexedMatch[] = [];
+    for (let i = 0; i < this.placed; i++) {
+      const index = this.window.start + i;
+      if (index > this.window.end) break;
+      const result = this.matchHistory.get(index);
+      if (result) onBoard.push({ index, result });
+    }
+    return computeDivergence(onBoard);
   }
 
   lastMatchResult(): MatchResult | null {
     return this.lastMatch;
-  }
-
-  /** Clear the pending mismatch (e.g. after the learner acknowledges a retry). */
-  clearLastMatch(): void {
-    this.lastMatch = null;
   }
 
   /**
@@ -397,7 +413,7 @@ export class TrainingSession {
   summary(learner: Engine): WindowSummary {
     const learnerBoard = toOccupancy(learner.snapshot().board);
     const proBoard = toOccupancy(this.track[this.window.end].snapshot.board);
-    return summarize(this.divergence, learnerBoard, proBoard);
+    return summarize(this.divergenceState(), learnerBoard, proBoard);
   }
 }
 
