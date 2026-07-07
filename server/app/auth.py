@@ -174,9 +174,21 @@ class MeOut(ApiModel):
 @router.get("/auth/login/discord")
 def login_discord(oauth: DiscordDep) -> RedirectResponse:
     state = secrets.token_urlsafe(24)
+    settings = get_settings()
     response = RedirectResponse(oauth.authorize_url(state), status_code=307)
+    # The state cookie is set here (on the redirect to Discord) and must come
+    # back on the cross-site callback navigation (discord.com → the API). In
+    # prod the API and frontend are different sites, so — like the session
+    # cookie — it needs SameSite=None; Secure to be stored and returned; a
+    # SameSite=None cookie without Secure is rejected outright by browsers.
+    # These are config-driven (lax/false in same-site dev, none/true in prod).
     response.set_cookie(
-        STATE_COOKIE, state, max_age=600, httponly=True, samesite="lax"
+        STATE_COOKIE,
+        state,
+        max_age=600,
+        httponly=True,
+        samesite=settings.cookie_samesite,
+        secure=settings.cookie_secure,
     )
     return response
 
