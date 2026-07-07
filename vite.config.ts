@@ -1,4 +1,7 @@
-import { defineConfig } from "vite";
+// `vitest/config` re-exports Vite's defineConfig widened with the `test` field,
+// so a single config drives both `vite build` and the Vitest suite. Importing
+// from "vite" instead makes `test` an unknown property (TS2769).
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 // The @haelp/teto engine references `chalk` on an optional console-rendering
