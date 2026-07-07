@@ -1,0 +1,121 @@
+name: stacker
+
+services:
+  db:
+    image: postgres:16
+    # Survive host reboots / Docker daemon restarts (prod), but stay down after an
+    # explicit `make down` / `docker compose stop`.
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-stacker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stacker}
+      POSTGRES_DB: ${POSTGRES_DB:-stacker}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stacker} -d ${POSTGRES_DB:-stacker}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # Throwaway Postgres for the test suite: tmpfs-backed, nothing survives a
+  # restart — which is the point. Host port 5433; in-network it's db-test:5432.
+  db-test:
+    image: postgres:16
+    # Test-only, tmpfs-backed — deliberately NOT auto-restarted in prod (it holds
+    # nothing worth keeping and isn't part of the running app).
+    restart: "no"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-stacker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stacker}
+      POSTGRES_DB: stacker_test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stacker} -d stacker_test"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-stacker}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-stacker-secret-key}
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: create the replays bucket, then exit.
+  minio-init:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-stacker} ${MINIO_ROOT_PASSWORD:-stacker-secret-key} &&
+      mc mb --ignore-existing local/${S3_BUCKET:-replays}
+      "
+    restart: "no"
+
+  # One-shot DB migration, run to completion before the api starts. Keeping this
+  # separate from `api` (which is restart: unless-stopped) means a failing
+  # migration fails HERE, visibly and once, instead of crash-looping the api
+  # container (which would re-run `alembic upgrade head` on every restart and
+  # hammer Postgres with no backoff). Shares the api image via `stacker-api`.
+  migrate:
+    build: ./server
+    image: stacker-api
+    restart: "no"
+    env_file:
+      - .env
+    volumes:
+      - ./server:/app
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+
+  api:
+    build: ./server
+    image: stacker-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      # Bind-mount the source for hot reload; deps live in the image.
+      - ./server:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      # Wait for migrations to finish successfully; don't run them here (see the
+      # `migrate` service) so a bad migration can't crash-loop this container.
+      migrate:
+        condition: service_completed_successfully
+    # `--reload` (file-watch autoreload) is a dev convenience; it's slower and less
+    # stable than a plain worker. Kept on by default via UVICORN_RELOAD; set it to
+    # an empty string in prod (.env: UVICORN_RELOAD=) to run without the watcher.
+    command: >
+      sh -c "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 ${UVICORN_RELOAD---reload}"
+
+volumes:
+  db-data:
+  minio-data:

@@ -124,7 +124,108 @@ function extractStats(replay: any): ReplayMetadata["stats"] {
 }
 
 /**
- * Parse raw JSON text of a .ttr into a ParsedReplay, or an error.
+ * Contextual inputs for {@link buildParsedReplay} — the raw options/events plus
+ * the surrounding replay metadata, however the container (`.ttr` file, or one
+ * player of one `.ttrm` round) chose to source them.
+ */
+export interface ReplayBuildInput {
+  /** The player's raw (possibly partial) options block. */
+  rawOptions: Partial<GameTypes.ReadyOptions>;
+  /** The player's ordered event stream (keydown/keyup/ige/start/end). */
+  events: unknown[];
+  /** Display name for this run. */
+  username: string;
+  /** Game mode ("40l", "league", …). */
+  gamemode: string;
+  /** Replay-format version, or null if absent. */
+  version: number | null;
+  /** Explicit frame count, or null to infer from the last event. */
+  frames: number | null;
+  /**
+   * Source for stats extraction (results/stats block). Defaults to searching
+   * within a `.ttr` replay body; `.ttrm` passes the player's replay object.
+   */
+  statsSource?: any;
+}
+
+/**
+ * Build a {@link ParsedReplay} from an already-located options block + event
+ * stream. Shared by the `.ttr` parser and the `.ttrm` per-player extractor so
+ * both go through the identical defaults merge, Zenith substitution, frame
+ * inference, and metadata assembly.
+ */
+export function buildParsedReplay(input: ReplayBuildInput): ParsedReplay {
+  const { rawOptions, events, username, gamemode, version } = input;
+
+  // Real replay options are a partial diff over a mode preset (bagtype, board,
+  // kickset, gravity, garbage config may be omitted). Merge over standard 7-bag
+  // defaults so the engine gets a complete, valid configuration. Fields the
+  // replay set explicitly (e.g. Zenith's bagtype) survive the merge.
+  const options = withDefaults(rawOptions);
+
+  const warnings: string[] = [];
+
+  if (version === null) {
+    warnings.push("Replay has no version field; proceeding with caution.");
+  } else if (!KNOWN_REPLAY_VERSIONS.includes(version as 1)) {
+    warnings.push(
+      `Unknown replay version ${version} (known: ${KNOWN_REPLAY_VERSIONS.join(", ")}). ` +
+        `Fields may be interpreted incorrectly.`,
+    );
+  }
+
+  // Frame count: prefer explicit `frames`, else the last event's frame.
+  let frames = input.frames;
+  if (frames === null && events.length > 0) {
+    const last = events[events.length - 1] as any;
+    frames = num(last?.frame) ?? events.length;
+    warnings.push("No explicit frame count; inferred from last event.");
+  }
+  frames ??= 0;
+
+  // Effective bag type after merging in defaults. If the replay didn't specify
+  // one, note that we assumed the default.
+  const bagtype = str(options.bagtype);
+  if (str((rawOptions as any).bagtype) === null) {
+    warnings.push(
+      `Replay options omit bagtype; assuming "${bagtype}" from mode defaults.`,
+    );
+  }
+
+  const metadata: ReplayMetadata = {
+    username,
+    gamemode,
+    frames,
+    durationSec: frames / 60,
+    seed: num(options.seed),
+    bagtype,
+    hasgarbage:
+      typeof options.hasgarbage === "boolean" ? options.hasgarbage : null,
+    stats: extractStats(input.statsSource ?? {}),
+  };
+
+  // Partial Zenith support: the engine has no "zenith" bag RNG, but Zenith's
+  // queue matches a plain 7-bag for the early game. Substitute 7-bag in the
+  // engine options so reconstruction (and the learner engine) can run at all;
+  // `metadata.bagtype` keeps the true value for display, and the reconstruction
+  // is capped where it drifts (see replay/zenith.ts).
+  if (bagtype === "zenith") {
+    options.bagtype = "7-bag";
+  }
+
+  return {
+    version,
+    gamemode,
+    options: options as GameTypes.ReadyOptions,
+    events,
+    frames,
+    metadata,
+    warnings,
+  };
+}
+
+/**
+ * Parse raw JSON text of a `.ttr` replay into a ParsedReplay, or an error.
  */
 export function parseReplay(text: string): ParseResult {
   let root: any;
@@ -148,85 +249,23 @@ export function parseReplay(text: string): ParseResult {
     return { ok: false, error: "Replay is missing its options block." };
   }
 
-  // Real .ttr options are a partial diff over a mode preset (bagtype, board,
-  // kickset, gravity, garbage config may be omitted). Merge over standard 7-bag
-  // defaults so the engine gets a complete, valid configuration. Fields the
-  // replay set explicitly (e.g. Zenith's bagtype) survive the merge.
-  const options = withDefaults(rawOptions as Partial<GameTypes.ReadyOptions>);
-
   const events = Array.isArray(replay.events)
     ? replay.events
     : Array.isArray(replay.frames)
       ? replay.frames
       : [];
 
-  const warnings: string[] = [];
-
-  // Version: the top-level replay-format version (options.version is a separate
-  // config-schema version and is not validated here).
-  const version = num(root.version) ?? num(root.data?.version);
-  if (version === null) {
-    warnings.push("Replay has no version field; proceeding with caution.");
-  } else if (!KNOWN_REPLAY_VERSIONS.includes(version as 1)) {
-    warnings.push(
-      `Unknown replay version ${version} (known: ${KNOWN_REPLAY_VERSIONS.join(", ")}). ` +
-        `Fields may be interpreted incorrectly.`,
-    );
-  }
-
-  const gamemode =
-    str(root.gamemode) ?? str(root.data?.gamemode) ?? "unknown";
-
-  // Frame count: prefer explicit `frames` number, else the last event's frame.
-  let frames = num(replay.frames);
-  if (frames === null && events.length > 0) {
-    const last = events[events.length - 1] as any;
-    frames = num(last?.frame) ?? events.length;
-    warnings.push("No explicit frame count; inferred from last event.");
-  }
-  frames ??= 0;
-
-  // Effective bag type after merging in defaults. If the replay didn't specify
-  // one, note that we assumed the default.
-  const bagtype = str(options.bagtype);
-  if (str((rawOptions as any).bagtype) === null) {
-    warnings.push(
-      `Replay options omit bagtype; assuming "${bagtype}" from mode defaults.`,
-    );
-  }
-
-  const metadata: ReplayMetadata = {
-    username: extractUsername(root),
-    gamemode,
-    frames,
-    durationSec: frames / 60,
-    seed: num(options.seed),
-    bagtype,
-    hasgarbage:
-      typeof options.hasgarbage === "boolean" ? options.hasgarbage : null,
-    stats: extractStats(replay),
-  };
-
-  // Partial Zenith support: the engine has no "zenith" bag RNG, but Zenith's
-  // queue matches a plain 7-bag for the early game. Substitute 7-bag in the
-  // engine options so reconstruction (and the learner engine) can run at all;
-  // `metadata.bagtype` keeps the true value for display, and the reconstruction
-  // is capped where it drifts (see replay/zenith.ts).
-  if (bagtype === "zenith") {
-    options.bagtype = "7-bag";
-  }
-
   return {
     ok: true,
-    replay: {
-      version,
-      gamemode,
-      options: options as GameTypes.ReadyOptions,
+    replay: buildParsedReplay({
+      rawOptions: rawOptions as Partial<GameTypes.ReadyOptions>,
       events,
-      frames,
-      metadata,
-      warnings,
-    },
+      username: extractUsername(root),
+      gamemode: str(root.gamemode) ?? str(root.data?.gamemode) ?? "unknown",
+      version: num(root.version) ?? num(root.data?.version),
+      frames: num(replay.frames),
+      statsSource: replay,
+    }),
   };
 }
 

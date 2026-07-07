@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>TETR.IO Stacking Trainer — dev</title>
+    <title>Stacker — dev</title>
     <style>
       :root {
         color-scheme: dark;
@@ -28,14 +28,16 @@
         flex-wrap: wrap;
         justify-content: center;
       }
-      /* Boards top-align so the YOU and PRO playfields line up, regardless of
-         the extra content (status/comparison) that hangs below the YOU board.
-         The stats panel keeps its own bottom alignment (see #stats-root). */
       .board-group {
         display: flex;
         gap: 24px;
         align-items: flex-start;
         position: relative;
+      }
+      /* The replay panel beside the board is short; center it against the tall
+         playfield instead of letting it float at the top row. */
+      .board-group > #replay-root {
+        align-self: center;
       }
       .play-col {
         display: flex;
@@ -49,19 +51,170 @@
         font-weight: 700;
         color: #8b949e;
       }
-      /* Pro-board title before a replay is loaded (or after a session ends):
-         a dimmed placeholder instead of a player name. */
-      .board-title.placeholder {
-        color: #6e7681;
-        font-weight: 500;
-        font-style: italic;
-        letter-spacing: 0.04em;
-      }
       .board-info {
         font-size: 0.82rem;
         color: #8b949e;
         font-variant-numeric: tabular-nums;
         min-height: 1.1em;
+      }
+
+      /* ---- key-hints HUD: keycaps for the presses to reach the target ---- */
+      .key-hints {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        justify-content: center;
+        gap: 10px;
+        max-width: 340px;
+        padding: 2px 0;
+      }
+      .key-hints-label {
+        align-self: center;
+        font-size: 0.7rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #6e7681;
+      }
+      .key-cap-wrap {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+      }
+      .key-cap-row {
+        display: flex;
+        align-items: center;
+        gap: 3px;
+      }
+      .key-cap {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-width: 30px;
+        padding: 3px 6px;
+        background: #1b2129;
+        border: 1px solid #303a47;
+        border-bottom-width: 3px;
+        border-radius: 6px;
+        color: #e6edf3;
+        font-family: inherit;
+        line-height: 1.05;
+      }
+      .key-cap-glyph {
+        font-size: 1.05rem;
+      }
+      .key-cap-bind {
+        font-size: 0.6rem;
+        color: #8b949e;
+        font-variant-numeric: tabular-nums;
+      }
+      /* Rotations and hold are highlighted so they stand out from the moves. */
+      .key-cap[data-action="rotateCW"],
+      .key-cap[data-action="rotateCCW"],
+      .key-cap[data-action="rotate180"] {
+        border-color: #3b5bdb;
+        color: #adc0ff;
+      }
+      .key-cap[data-action="hold"] {
+        border-color: #b7791f;
+        color: #f0c674;
+      }
+      .key-cap[data-action="hardDrop"] {
+        border-color: #2ea043;
+        color: #7ee787;
+      }
+      /* A DAS-held move: hold the key (don't tap). Elongated with a rightward
+         "sustain" gradient and an amber accent so it reads as "press and hold". */
+      .key-cap.held {
+        min-width: 46px;
+        border-color: #d29922;
+        color: #f0c674;
+        background: linear-gradient(90deg, #2a2415 0%, #1b2129 70%);
+        box-shadow: inset 0 0 0 1px rgba(210, 153, 34, 0.25);
+      }
+      .key-cap.held[data-action="moveRight"] {
+        background: linear-gradient(270deg, #2a2415 0%, #1b2129 70%);
+      }
+      /* DAS ALREADY CHARGED (terminal carry): the key came in held from the last
+         piece, so its DAS is already full — you just let it slide and drop, no
+         fresh hold. Where `.held` shows a charging gradient, this shows a *fully
+         filled* amber face with a soft glow (the meter is topped up), plus a ⚡
+         badge. It never combines with .carried/.keep-next (a terminal carry
+         passes nothing on), so these rules stand alone. */
+      .key-cap.charged {
+        min-width: 46px;
+        border-color: #e3b341;
+        color: #241a06;
+        background: linear-gradient(180deg, #f0c247 0%, #d29922 100%);
+        box-shadow: 0 0 8px rgba(227, 179, 65, 0.45);
+      }
+      .key-cap.charged .key-cap-glyph,
+      .key-cap.charged .key-cap-bind {
+        color: #241a06;
+      }
+      .key-cap.charged .key-cap-hold {
+        color: #5c3d00;
+      }
+      /* A CARRIED hold: the key was already down from the previous piece — keep
+         holding, don't re-press. A leading "«" cue and a brighter, dashed accent
+         mark it as a continuation rather than a fresh press. */
+      .key-cap.carried {
+        border-style: dashed;
+        border-color: #e3b341;
+        color: #f8d886;
+        box-shadow:
+          inset 0 0 0 1px rgba(227, 179, 65, 0.35),
+          -3px 0 0 -1px #e3b341;
+      }
+      .key-cap.carried .key-cap-glyph::before {
+        content: "«";
+        margin-right: 2px;
+        color: #e3b341;
+      }
+      /* A KEEP-NEXT hold: hold this key through the drop into the next piece
+         (don't release). A trailing "»" cue and a golden right edge mark the
+         continuation forward. A cap can be both carried (from prev) and
+         keep-next (into next) — the middle of a multi-piece hold. */
+      .key-cap.keep-next {
+        border-color: #e3b341;
+        color: #f8d886;
+        box-shadow:
+          inset 0 0 0 1px rgba(227, 179, 65, 0.35),
+          3px 0 0 -1px #e3b341;
+      }
+      .key-cap.keep-next .key-cap-glyph::after {
+        content: "»";
+        margin-left: 2px;
+        color: #e3b341;
+      }
+      .key-cap.carried.keep-next {
+        border-style: dashed;
+      }
+      .key-cap-caption.das[title] {
+        color: #e3b341;
+      }
+      .key-cap-hold {
+        display: block;
+        font-size: 0.5rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: #d29922;
+      }
+      .key-cap-caption.das {
+        color: #d29922;
+        font-weight: 700;
+      }
+      .key-cap-mult {
+        font-size: 0.72rem;
+        font-weight: 700;
+        color: #c9d1d9;
+      }
+      .key-cap-caption {
+        font-size: 0.6rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: #6e7681;
       }
       canvas {
         display: block;
@@ -89,11 +242,10 @@
       }
 
       /* ---- live stats panel (Pieces/PPS, Attack/APM) ---- */
-      /* The stats sit to the left of the YOU playfield and bottom-align with it,
+      /* The stats sit to the left of the playfield and bottom-align with it,
          matching TETR.IO. They are absolutely positioned so they don't consume
-         layout width — otherwise the YOU canvas would shift right and no longer
-         line up with the PRO canvas. `right: 100%` places them just left of the
-         canvas; `bottom: 0` aligns them to the playfield's bottom edge. */
+         layout width. `right: 100%` places them just left of the canvas;
+         `bottom: 0` aligns them to the playfield's bottom edge. */
       .board-with-stats {
         position: relative;
         display: flex;
@@ -170,6 +322,11 @@
         align-items: center;
         justify-content: space-between;
         margin-bottom: 12px;
+      }
+      /* Controls (keybinds) panel sits in the side column beside Settings. Its
+         rows are short, so it can be narrower than the full Settings card. */
+      .controls-panel {
+        width: 240px;
       }
       .settings-section {
         border-top: 1px solid #2b3240;
@@ -294,9 +451,9 @@
         align-items: flex-start;
         gap: 16px;
       }
-      /* The React mount wrappers pass through so their panels (replay, settings,
-         controls) are direct flex items of .side-col and lay out horizontally. */
-      #replay-root,
+      /* The React mount wrappers pass through so their panels (controls,
+         settings) are direct flex items of .side-col and lay out horizontally. */
+      #controls-root,
       #settings-root {
         display: contents;
       }
@@ -363,6 +520,43 @@
         border: 1px solid rgba(245, 167, 66, 0.35);
         border-radius: 6px;
         padding: 8px 10px;
+      }
+      /* Round + player pickers for a loaded multiplayer .ttrm match. */
+      .match-selector {
+        margin-top: 12px;
+        padding: 10px;
+        border: 1px solid rgba(75, 108, 243, 0.35);
+        border-radius: 6px;
+        background: rgba(75, 108, 243, 0.06);
+      }
+      .match-selector-title {
+        margin: 0 0 8px;
+        font-size: 0.8rem;
+        color: #9db0e8;
+        line-height: 1.4;
+      }
+      .match-selector-controls {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .match-selector-controls label {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        font-size: 0.72rem;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: #7f8db3;
+      }
+      .match-selector-controls select {
+        font-size: 0.9rem;
+        padding: 4px 6px;
+        border-radius: 5px;
+        border: 1px solid #33395a;
+        background: #12141f;
+        color: #e8ecf7;
+        min-width: 120px;
       }
       .replay-meta dl {
         margin: 12px 0 0;
@@ -489,6 +683,21 @@
       .session-field input[type="range"] {
         width: 100%;
       }
+      /* "Show key hints" checkbox row (session settings). */
+      .session-check {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        margin: 8px 0;
+        font-size: 0.82rem;
+        color: #c9d1d9;
+        cursor: pointer;
+      }
+      .session-check input {
+        accent-color: #4b6cf3;
+        cursor: pointer;
+        align-self: center;
+      }
       .session-window {
         font-size: 0.8rem;
         color: #8b949e;
@@ -522,22 +731,25 @@
       }
 
       /* ---- "stack like the pro" comparison ---- */
-      /* The two boards sit side by side at a normal gap; the comparison panel is
-         absolutely positioned in the empty middle strip between the playfields,
-         anchored near their bottom edge — below where the left board's NEXT
-         queue ends, so it doesn't cover it. Being out of flow, it reserves no
-         width, keeping the boards close enough to fit the viewport. */
       .board-area {
-        position: relative;
         display: flex;
         flex-direction: column;
         align-items: center;
       }
+      /* The comparison panel (shown only during a session) is pinned to the
+         bottom-left corner of the viewport, so it stays visible no matter how
+         far up the board the player is stacking or how the page is scrolled — an
+         in-flow panel below the board scrolled off-screen at the top of the
+         stack. Bottom-LEFT is the only region clear during a session: the whole
+         right column is taken by the tall Replay + Training-window panel, while
+         the left holds just the compact stats block. The card has a solid
+         background + shadow so it reads cleanly if it meets the stats on a short
+         viewport, and its own z-index keeps it on top. */
       #comparison-root {
-        position: absolute;
-        left: 50%;
-        bottom: 40px;
-        transform: translateX(-50%);
+        position: fixed;
+        left: 24px;
+        bottom: 24px;
+        z-index: 20;
       }
       /* When no session is active the React root is empty; hide it entirely. */
       #comparison-root:empty {
@@ -613,44 +825,662 @@
       .compare-summary dl {
         margin: 0;
       }
+
+      /* ---- app shell (router nav) ---- */
+      .app-nav {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        padding: 10px 24px;
+        border-bottom: 1px solid #2b3240;
+      }
+      .app-nav .brand {
+        font-weight: 700;
+        color: #e6edf3;
+        text-decoration: none;
+        letter-spacing: 0.02em;
+        margin-right: 8px;
+      }
+      .app-nav a {
+        color: #8b949e;
+        text-decoration: none;
+        font-size: 0.9rem;
+      }
+      .app-nav a:hover {
+        color: #c9d1d9;
+      }
+      .app-nav a.active {
+        color: #e6edf3;
+      }
+      .app-nav .nav-right {
+        margin-left: auto;
+      }
+      .page {
+        max-width: 720px;
+        margin: 40px auto;
+        padding: 0 20px;
+        color: #c9d1d9;
+      }
+      .page h2 {
+        margin-top: 0;
+      }
+      .page p {
+        text-align: left;
+        max-width: none;
+      }
+      .nav-user {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: #e6edf3;
+        font-size: 0.9rem;
+      }
+      .nav-avatar {
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+      }
+      .nav-logout {
+        background: transparent;
+        color: #8b949e;
+        border: 1px solid #2b3240;
+        border-radius: 4px;
+        padding: 3px 8px;
+        cursor: pointer;
+        font-size: 0.8rem;
+      }
+      .nav-logout:hover {
+        color: #f34b4b;
+        border-color: #f34b4b;
+      }
+      .app-footer {
+        display: flex;
+        justify-content: center;
+        gap: 18px;
+        padding: 16px 24px;
+        margin-top: 40px;
+        border-top: 1px solid #2b3240;
+      }
+      .app-footer a {
+        color: #8b949e;
+        text-decoration: none;
+        font-size: 0.8rem;
+      }
+      .app-footer a:hover {
+        color: #c9d1d9;
+      }
+      .legal-page h3 {
+        margin-top: 28px;
+        color: #e6edf3;
+      }
+      .legal-page ul {
+        text-align: left;
+        padding-left: 24px;
+      }
+      .legal-page li {
+        margin: 6px 0;
+      }
+      .legal-updated {
+        color: #8b949e;
+        font-size: 0.85rem;
+      }
+      .discord-login {
+        display: inline-block;
+        background: #5865f2;
+        color: #fff;
+        text-decoration: none;
+        border-radius: 6px;
+        padding: 10px 18px;
+        font-weight: 600;
+      }
+      .discord-login:hover {
+        background: #4752c4;
+      }
+      /* ---- publish segment panel ---- */
+      .publish {
+        width: 300px;
+        background: #161b22;
+        border: 1px solid #2b3240;
+        border-radius: 8px;
+        padding: 16px;
+        text-align: left;
+      }
+      .publish h3 {
+        margin: 0 0 10px;
+        font-size: 0.8rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #8b949e;
+      }
+      .publish-field {
+        display: block;
+        font-size: 0.8rem;
+        color: #8b949e;
+        margin-bottom: 10px;
+      }
+      .publish-field input,
+      .publish-field textarea,
+      .publish-field select {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        margin-top: 4px;
+        background: #0e1116;
+        color: #c9d1d9;
+        border: 1px solid #2b3240;
+        border-radius: 4px;
+        padding: 6px 8px;
+        font-size: 0.85rem;
+      }
+      .publish-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 10px;
+      }
+      .tag-chip {
+        background: #0e1116;
+        color: #8b949e;
+        border: 1px solid #2b3240;
+        border-radius: 12px;
+        padding: 3px 10px;
+        cursor: pointer;
+        font-size: 0.78rem;
+      }
+      .tag-chip.picked {
+        color: #4bf3d6;
+        border-color: #4bf3d6;
+      }
+      .publish-submit {
+        width: 100%;
+        background: #1f4b6f;
+        color: #cfe8ff;
+        border: 1px solid #2f6faf;
+        border-radius: 4px;
+        padding: 8px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        font-weight: 600;
+      }
+      .publish-submit:hover:not(:disabled) {
+        background: #2f6faf;
+      }
+      .publish-submit:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .publish-login {
+        color: #f5a742;
+        font-size: 0.85rem;
+      }
+      .publish-ok {
+        color: #4bf35f;
+        font-size: 0.85rem;
+        margin-top: 8px;
+      }
+      .publish-error {
+        color: #f34b4b;
+        font-size: 0.85rem;
+        margin-top: 8px;
+      }
+
+      /* ---- browse: facet sidebar + card grid ---- */
+      .browse {
+        max-width: 1280px;
+        display: flex;
+        align-items: flex-start;
+        gap: 24px;
+      }
+      .browse-facets {
+        flex: 0 0 220px;
+        position: sticky;
+        top: 20px;
+        background: #161b22;
+        border: 1px solid #2b3240;
+        border-radius: 8px;
+        padding: 16px;
+      }
+      .facet-field {
+        display: block;
+        font-size: 0.8rem;
+        color: #8b949e;
+        margin-bottom: 12px;
+      }
+      .facet-field input,
+      .facet-field select {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        margin-top: 4px;
+        background: #0e1116;
+        color: #c9d1d9;
+        border: 1px solid #2b3240;
+        border-radius: 4px;
+        padding: 6px 8px;
+        font-size: 0.85rem;
+      }
+      .facet-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 6px;
+      }
+      .facet-range {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 4px;
+      }
+      .facet-range input {
+        margin-top: 0;
+        width: 100%;
+      }
+      .facet-reset {
+        width: 100%;
+        background: transparent;
+        color: #8b949e;
+        border: 1px solid #2b3240;
+        border-radius: 4px;
+        padding: 6px;
+        cursor: pointer;
+        font-size: 0.8rem;
+      }
+      .facet-reset:hover {
+        color: #c9d1d9;
+        border-color: #8b949e;
+      }
+      .browse-results {
+        flex: 1;
+        min-width: 0;
+      }
+      .browse-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        gap: 16px;
+      }
+      .browse-empty,
+      .browse-loading {
+        color: #8b949e;
+        font-size: 0.9rem;
+      }
+      .browse-error {
+        color: #f34b4b;
+        font-size: 0.9rem;
+      }
+      .browse-sentinel {
+        height: 1px;
+      }
+
+      /* ---- segment cards ---- */
+      .segment-card {
+        background: #161b22;
+        border: 1px solid #2b3240;
+        border-radius: 8px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        text-align: left;
+      }
+      .card-thumb {
+        display: block;
+        aspect-ratio: 4 / 3;
+        background: #0e1116;
+        border-bottom: 1px solid #2b3240;
+      }
+      .card-thumb img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        display: block;
+      }
+      .card-thumb-empty {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: #4b5563;
+        font-size: 0.8rem;
+      }
+      .card-body {
+        padding: 10px 12px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        flex: 1;
+      }
+      .card-title {
+        color: #e6edf3;
+        font-weight: 600;
+        text-decoration: none;
+        font-size: 0.95rem;
+      }
+      .card-title:hover {
+        color: #4bf3d6;
+      }
+      .card-meta {
+        margin: 0;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.78rem;
+        color: #8b949e;
+      }
+      .card-meta a,
+      .card-player {
+        color: #cfe8ff;
+        text-decoration: none;
+      }
+      .card-meta a:hover {
+        text-decoration: underline;
+      }
+      .card-mode {
+        background: #0e1116;
+        border: 1px solid #2b3240;
+        border-radius: 4px;
+        padding: 1px 6px;
+      }
+      .card-difficulty {
+        color: #f5a742;
+        letter-spacing: 0.1em;
+      }
+      .card-tags {
+        margin: 0;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .tag-chip.static {
+        cursor: default;
+      }
+      .card-actions {
+        margin-top: auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .practice-button {
+        background: #1f4b6f;
+        color: #cfe8ff;
+        border: 1px solid #2f6faf;
+        border-radius: 4px;
+        padding: 5px 12px;
+        text-decoration: none;
+        font-size: 0.82rem;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .practice-button:hover {
+        background: #2f6faf;
+      }
+
+      /* ---- votes ---- */
+      .votes {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .vote-btn {
+        background: #0e1116;
+        color: #8b949e;
+        border: 1px solid #2b3240;
+        border-radius: 4px;
+        padding: 3px 8px;
+        cursor: pointer;
+        font-size: 0.8rem;
+      }
+      .vote-btn.up:hover,
+      .vote-btn.up.cast {
+        color: #4bf35f;
+        border-color: #4bf35f;
+      }
+      .vote-btn.down:hover,
+      .vote-btn.down.cast {
+        color: #f34b4b;
+        border-color: #f34b4b;
+      }
+      .vote-login {
+        font-size: 0.75rem;
+        color: #f5a742;
+      }
+      .vote-login a {
+        color: #cfe8ff;
+      }
+
+      /* ---- replay + segment detail pages ---- */
+      .replay-page,
+      .segment-page {
+        max-width: 1080px;
+      }
+      .replay-page h2 a {
+        color: #cfe8ff;
+        text-decoration: none;
+      }
+      .replay-page-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        color: #8b949e;
+        font-size: 0.85rem;
+      }
+      .replay-page-warn {
+        color: #f5a742;
+      }
+      .segment-detail {
+        display: flex;
+        gap: 24px;
+        align-items: flex-start;
+      }
+      .segment-detail-thumb {
+        flex: 0 0 340px;
+        background: #0e1116;
+        border: 1px solid #2b3240;
+        border-radius: 8px;
+        overflow: hidden;
+        aspect-ratio: 4 / 3;
+      }
+      .segment-detail-thumb img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        display: block;
+      }
+      .segment-detail-body {
+        flex: 1;
+        min-width: 0;
+      }
+      .segment-detail-body h2 {
+        margin: 0 0 8px;
+      }
+      .segment-description {
+        color: #c9d1d9;
+      }
+      .segment-hints {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        margin: 10px 0;
+        font-size: 0.82rem;
+      }
+      .segment-hints dt {
+        color: #8b949e;
+      }
+      .segment-hints dd {
+        margin: 0;
+        color: #e6edf3;
+        font-weight: 600;
+      }
+      .segment-byline {
+        color: #8b949e;
+        font-size: 0.8rem;
+      }
+      .segment-byline a {
+        color: #cfe8ff;
+      }
+      .practice-error {
+        max-width: 720px;
+        margin: 12px auto 0;
+        color: #f34b4b;
+        font-size: 0.9rem;
+      }
+
+      /* ---- reports + admin queue ---- */
+      .report {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .report-btn {
+        background: #0e1116;
+        color: #8b949e;
+        border: 1px solid #2b3240;
+        border-radius: 4px;
+        padding: 3px 8px;
+        cursor: pointer;
+        font-size: 0.8rem;
+      }
+      .report-btn:hover {
+        color: #f5a742;
+        border-color: #f5a742;
+      }
+      .report-form {
+        display: inline-flex;
+        gap: 4px;
+      }
+      .report-form input {
+        background: #0e1116;
+        color: #c9d1d9;
+        border: 1px solid #2b3240;
+        border-radius: 4px;
+        padding: 3px 6px;
+        font-size: 0.78rem;
+        width: 150px;
+      }
+      .report-form button {
+        background: #6f3a1f;
+        color: #ffd9c2;
+        border: 1px solid #af5b2f;
+        border-radius: 4px;
+        padding: 3px 8px;
+        cursor: pointer;
+        font-size: 0.78rem;
+      }
+      .report-form button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .report-sent {
+        color: #f5a742;
+        font-size: 0.8rem;
+      }
+      .report-error {
+        color: #f34b4b;
+        font-size: 0.78rem;
+      }
+      .admin-page {
+        max-width: 860px;
+      }
+      .admin-reports {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .admin-report {
+        background: #161b22;
+        border: 1px solid #2b3240;
+        border-radius: 8px;
+        padding: 12px 14px;
+      }
+      .admin-report p {
+        margin: 0 0 6px;
+      }
+      .admin-report-head {
+        display: flex;
+        gap: 14px;
+        font-size: 0.8rem;
+        color: #8b949e;
+      }
+      .admin-report-reason {
+        color: #e6edf3;
+      }
+      .admin-report-target {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        flex-wrap: wrap;
+        font-size: 0.85rem;
+        color: #8b949e;
+      }
+      .admin-report-target a {
+        color: #cfe8ff;
+      }
+      .admin-status {
+        border-radius: 4px;
+        padding: 1px 6px;
+        font-size: 0.75rem;
+        border: 1px solid #2b3240;
+      }
+      .admin-status-published {
+        color: #4bf35f;
+        border-color: #2b5f38;
+      }
+      .admin-status-pending {
+        color: #f5a742;
+        border-color: #6f5a1f;
+      }
+      .admin-status-removed {
+        color: #f34b4b;
+        border-color: #6f1f1f;
+      }
+      .admin-actions {
+        display: inline-flex;
+        gap: 6px;
+      }
+      .admin-actions button {
+        background: #0e1116;
+        color: #c9d1d9;
+        border: 1px solid #2b3240;
+        border-radius: 4px;
+        padding: 3px 10px;
+        cursor: pointer;
+        font-size: 0.8rem;
+      }
+      .admin-actions button:hover:not(:disabled) {
+        border-color: #8b949e;
+      }
+      .admin-actions button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      @media (max-width: 900px) {
+        .browse {
+          flex-direction: column;
+        }
+        .browse-facets {
+          position: static;
+          width: 100%;
+          box-sizing: border-box;
+          flex: none;
+        }
+        .segment-detail {
+          flex-direction: column;
+        }
+        .segment-detail-thumb {
+          flex: none;
+          width: 100%;
+        }
+      }
     </style>
   </head>
   <body>
-    <main>
-      <h1>TETR.IO Stacking Trainer</h1>
-      <div class="stage">
-        <div class="board-area">
-          <div class="board-group">
-            <!-- Learner board (left) — you play here. -->
-            <div class="play-col">
-              <div class="board-title" id="learner-title">YOU</div>
-              <!-- Stats sit left of the board and bottom-align to the playfield,
-                   matching TETR.IO's layout. -->
-              <div class="board-with-stats">
-                <div id="stats-root"></div>
-                <canvas id="board" tabindex="0"></canvas>
-              </div>
-              <p id="learner-info" class="board-info"></p>
-              <p id="status" class="status"></p>
-            </div>
-            <!-- Pro board (right) — always visible; shows an empty board until a
-                 replay is loaded and a training session begins. -->
-            <div class="play-col pro-col" id="pro-col">
-              <div class="board-title placeholder" id="pro-title">No replay selected</div>
-              <canvas id="board-pro"></canvas>
-              <p id="pro-info" class="board-info"></p>
-            </div>
-          </div>
-          <!-- Comparison feedback sits on its own row below the boards, so it
-               never overlaps either board's queue or playfield. -->
-          <div id="comparison-root"></div>
-        </div>
-        <div class="side-col">
-          <div id="replay-root"></div>
-          <div id="settings-root"></div>
-        </div>
-      </div>
-    </main>
+    <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

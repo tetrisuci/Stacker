@@ -9,7 +9,7 @@
 // placed — a true race over the same window.
 
 import type { Engine, EngineSnapshot } from "../engine/adapter";
-import type { GarbageEvent, Placement } from "../replay/reconstruct";
+import type { InputStep, Placement } from "../replay/reconstruct";
 import {
   comparePlacement,
   computeDivergence,
@@ -28,6 +28,22 @@ export interface WindowSelection {
   start: number;
   /** Inclusive end placement index (0-based). */
   end: number;
+}
+
+/**
+ * The engine board's `insertGarbage` surface (not on the exported `Engine` type
+ * but present at runtime — it's how the engine itself materializes tanked
+ * garbage). Used to reproduce the pro's incoming garbage on the learner board.
+ */
+interface BoardWithGarbage {
+  insertGarbage?: (g: {
+    amount: number;
+    size: number;
+    column: number;
+    bombs: boolean;
+    isBeginning: boolean;
+    isEnd: boolean;
+  }) => void;
 }
 
 export interface BoardStatus {
@@ -61,10 +77,6 @@ export class TrainingSession {
    * at 100 entries, which froze the count (and the target ghost) at piece 100.
    */
   private placed = 0;
-  /** Garbage the pro's board gained, filtered to this window (tank boundaries). */
-  private garbageSchedule: GarbageEvent[];
-  /** Index into `garbageSchedule` of the next un-inserted garbage event. */
-  private nextGarbage = 0;
   /** The last comparison result (for the retry prompt), or null. */
   private lastMatch: MatchResult | null = null;
   /**
@@ -87,15 +99,9 @@ export class TrainingSession {
     track: Placement[],
     window: WindowSelection,
     learner: Engine,
-    garbage: GarbageEvent[],
   ) {
     this.track = track;
     this.window = window;
-    // Only garbage that enters the board within this window matters; rows with
-    // beforePiece <= start are already part of the seed snapshot. Keep ordered.
-    this.garbageSchedule = garbage
-      .filter((g) => g.beforePiece > window.start && g.beforePiece <= window.end)
-      .sort((a, b) => a.beforePiece - b.beforePiece);
     // Capture the pristine empty board before seeding (used as "before piece 0").
     this.emptySnapshot = learner.snapshot() as EngineSnapshot;
     // Seed the learner from the board state *before* the window's first piece was
@@ -104,6 +110,16 @@ export class TrainingSession {
     const startSnap = this.snapshotBefore(window.start);
     learner.fromSnapshot(startSnap);
     learner.tick([]); // spawn/settle after loading
+    // The pro snapshot carries the pro's *pending garbage queue* — garbage the
+    // engine will tank on its own as frames advance. We don't want that: it would
+    // land at a learner-frame-dependent moment (and, near an arrival, double up
+    // with our own deterministic per-piece injection — 8 rows instead of 4). We
+    // reproduce every incoming attack ourselves via injectGarbageFor at the exact
+    // piece boundary the pro received it, so clear the inherited queue and let our
+    // injection be the single source of garbage.
+    const gqueue = (learner as unknown as { garbageQueue?: { queue?: unknown[] } })
+      .garbageQueue;
+    if (gqueue?.queue) gqueue.queue.length = 0;
     // The pro snapshot carries a null undo baseline (the pro never used undo),
     // so establish the seeded state as the undo floor. Without this, undoing the
     // first placed piece restores `null` and crashes. Guard for engines built
@@ -114,65 +130,97 @@ export class TrainingSession {
       learner.practice.redo = [];
     }
     this.learnerStartFrame = learner.frame;
+    // Nothing injected yet: the first piece (window.start) is > this, so it can
+    // inject. Kept in sync by deliverIncomingGarbage (forward) and undo (rollback).
+    this.injectedThrough = window.start - 1;
     // Count placements from the engine's lock event (registered after the
-    // seeding tick so nothing spurious is counted).
+    // seeding tick so nothing spurious is counted). NOTE: garbage delivery is NOT
+    // done here — it must run *after* the caller has compared the just-locked
+    // piece against the pro (see deliverIncomingGarbage). Injecting on this lock
+    // would put the *next* piece's garbage on the board before the current piece
+    // is compared, so a garbage-free piece would spuriously mismatch the pro's
+    // (garbage-free) board.
     learner.events.on("falling.lock", () => {
       this.placed++;
     });
+    // The window's first piece may itself have arrived with garbage already on
+    // the board (the pro tanked it while placing that piece). The seed snapshot
+    // is the board *before* it, so inject that first piece's garbage now.
+    this.injectGarbageFor(learner, this.window.start);
+  }
+
+  /**
+   * The highest absolute pro index whose incoming garbage has been injected on
+   * the learner's current forward path. Advancing to a new piece injects that
+   * piece's garbage only when it's beyond this mark; {@link undo} rolls the mark
+   * back so re-advancing (via redo *or* a fresh re-placement) re-injects. This is
+   * what makes garbage survive undo/redo: a permanent per-index flag would skip
+   * re-injection after an undo cleared the rows, and a pure board-state check
+   * can't tell one arrival's rows from an earlier arrival's still on the board.
+   */
+  private injectedThrough: number;
+
+  /**
+   * Deliver the garbage the pro received before the piece the learner is now
+   * *about to place* (i.e. the piece after the one that just locked). Call this
+   * from the lock handler **after** comparing the just-locked piece against the
+   * pro — the just-locked piece is garbage-free vs. the pro at that moment, and
+   * this lays down the terrain for the next piece so it matches the pro's board
+   * when *it* is placed and compared. No-op in solo play (no garbage).
+   */
+  deliverIncomingGarbage(learner: Engine): void {
+    this.injectGarbageFor(learner, this.window.start + this.placed);
+  }
+
+  /**
+   * Insert the garbage the pro received while placing piece `absoluteIndex` into
+   * the learner's board, so the learner faces the same terrain. A no-op outside
+   * the window, for a piece already injected on this path, one with no arrival, or
+   * an engine without `insertGarbage`.
+   */
+  private injectGarbageFor(learner: Engine, absoluteIndex: number): void {
+    if (absoluteIndex < this.window.start || absoluteIndex > this.window.end) {
+      return;
+    }
+    if (absoluteIndex <= this.injectedThrough) return;
+    this.injectedThrough = absoluteIndex;
+    const tanks = this.track[absoluteIndex]?.garbage;
+    if (!tanks || tanks.length === 0) return;
+    const board = (learner as unknown as { board?: BoardWithGarbage }).board;
+    const insert = board?.insertGarbage;
+    if (!insert) return;
+    tanks.forEach((t, i) => {
+      insert.call(board, {
+        amount: t.amount,
+        size: t.size,
+        column: t.column,
+        bombs: false,
+        isBeginning: i === 0,
+        isEnd: i === tanks.length - 1,
+      });
+    });
+    // The engine captured this piece's undo baseline (`practice.lastPiece`) when
+    // it spawned — which is *before* this injection (the next piece's spawn fires
+    // ahead of the previous piece's lock, where we inject). Without refreshing it,
+    // undoing then redoing across this boundary restores the pre-garbage board and
+    // the rows vanish. Re-snapshot so the injected garbage is part of the baseline.
+    if (learner.practice) {
+      learner.practice.lastPiece = learner.snapshot({ isUndoRedo: true });
+    }
   }
 
   /**
    * Begin a session: seed `learner` from `track[start]` and return the session.
    * `start`/`end` are clamped to the track bounds; `end` must be >= `start`.
-   * `garbage` is the pro's received-garbage schedule (optional; empty by default).
    */
   static start(
     track: Placement[],
     window: WindowSelection,
     learner: Engine,
-    garbage: GarbageEvent[] = [],
   ): TrainingSession {
     const start = clamp(window.start, 0, track.length - 1);
     const end = clamp(window.end, start, track.length - 1);
-    return new TrainingSession(track, { start, end }, learner, garbage);
-  }
-
-  /**
-   * Insert any garbage rows the learner's board is now due for, exactly as
-   * they entered the pro's board: same piece boundary, same hole columns. The
-   * rows go straight into the board (bypassing the learner's garbage queue)
-   * because the queue tanks on a *frame* clock — a learner playing at a
-   * different speed would tank at a different piece, vertically offsetting
-   * every subsequent placement (and the target ghost) from the pro's.
-   * Call once per frame.
-   */
-  mirrorGarbage(learner: Engine): void {
-    const absoluteIndex = this.window.start + this.placed;
-    while (
-      this.nextGarbage < this.garbageSchedule.length &&
-      this.garbageSchedule[this.nextGarbage].beforePiece <= absoluteIndex
-    ) {
-      insertGarbageRows(learner, this.garbageSchedule[this.nextGarbage++]);
-    }
-  }
-
-  /**
-   * Re-align the garbage pointer after an undo/redo. The engine restores a
-   * board snapshot taken at the current piece's *spawn* — which contains all
-   * garbage inserted strictly before that piece (boundary < its index) and
-   * none inserted while it was falling. Rewinding the pointer accordingly
-   * lets `mirrorGarbage` re-insert what the restored snapshot lacks.
-   */
-  resyncGarbage(): void {
-    const absoluteIndex = this.window.start + this.placed;
-    let n = 0;
-    while (
-      n < this.garbageSchedule.length &&
-      this.garbageSchedule[n].beforePiece < absoluteIndex
-    ) {
-      n++;
-    }
-    this.nextGarbage = n;
+    return new TrainingSession(track, { start, end }, learner);
   }
 
   get windowLength(): number {
@@ -207,7 +255,19 @@ export class TrainingSession {
     const before = learner.practice?.undo?.length ?? 0;
     learner.undo();
     const ok = (learner.practice?.undo?.length ?? 0) < before;
-    if (ok) this.placed = Math.max(0, this.placed - 1);
+    if (ok) {
+      this.placed = Math.max(0, this.placed - 1);
+      // Roll the garbage watermark back to the piece now being faced. Undo
+      // restored the board (with any garbage that piece had) from the engine's
+      // baseline, so its garbage is present — but garbage for pieces *beyond* it
+      // was removed and must be re-injected when the learner advances again,
+      // whether by redo or a fresh re-placement. Capping the watermark here is
+      // what re-arms that re-injection.
+      this.injectedThrough = Math.min(
+        this.injectedThrough,
+        this.window.start + this.placed,
+      );
+    }
     return ok;
   }
 
@@ -216,60 +276,19 @@ export class TrainingSession {
     const before = learner.practice?.redo?.length ?? 0;
     learner.redo();
     const ok = (learner.practice?.redo?.length ?? 0) < before;
-    if (ok) this.placed++;
+    if (ok) {
+      this.placed++;
+      // Redo restores the board (with its garbage) from the engine baseline and
+      // fires no lock event, so injectGarbageFor never runs for it. Advance the
+      // watermark to match the piece now faced, so it stays consistent with the
+      // garbage the restored board already carries (else a later forward
+      // placement could re-inject rows that are already present).
+      this.injectedThrough = Math.max(
+        this.injectedThrough,
+        this.window.start + this.placed,
+      );
+    }
     return ok;
-  }
-
-  /**
-   * The pro snapshot to render: the pro board shown in lockstep with the learner.
-   * Both boards begin empty (before the window's first piece); after the learner
-   * has placed `n` pieces the pro board shows the board with the pro's pieces
-   * `start … start+n-1` placed — i.e. the board *before* piece `start+n`. At the
-   * window end it settles on the final board (after piece `end`).
-   */
-  proSnapshotFor(): EngineSnapshot {
-    return this.snapshotBefore(this.proNextIndex());
-  }
-
-  /**
-   * The absolute index of the pro piece the learner is currently working toward
-   * (the next piece to place). Ranges over `start … end+1`; at `end+1` the window
-   * is complete and both boards show the final state.
-   */
-  private proNextIndex(): number {
-    return clamp(
-      this.window.start + this.placed,
-      this.window.start,
-      this.window.end + 1,
-    );
-  }
-
-  /**
-   * The pro board's last-placed absolute index (mirrors the learner). This is the
-   * index of the most recent piece shown on the pro board, i.e. one behind the
-   * piece being worked toward; equals `window.start` before any piece is placed.
-   */
-  proIndexFor(): number {
-    return clamp(
-      this.proNextIndex() - 1,
-      this.window.start,
-      this.window.end,
-    );
-  }
-
-  proStatus(): BoardStatus {
-    // Pieces the pro board has completed within the window (matches the learner's
-    // placed count, clamped to the window length).
-    const placed = Math.min(this.placed, this.windowLength);
-    const idx = clamp(this.window.start + placed, this.window.start, this.window.end);
-    return {
-      pieceInWindow: placed,
-      windowLength: this.windowLength,
-      absoluteIndex: idx,
-      // Absolute replay time of the piece the pro board currently shows.
-      elapsedSec: this.track[idx].frame / 60,
-      done: placed >= this.windowLength,
-    };
   }
 
   learnerStatus(learner: Engine): BoardStatus {
@@ -296,6 +315,18 @@ export class TrainingSession {
     if (placed >= this.windowLength) return null;
     const p = this.track[this.window.start + placed];
     return { piece: p.piece, x: p.x, y: p.y, rotation: p.rot };
+  }
+
+  /**
+   * The pro's actual keydown sequence (finesse) for the piece the learner is
+   * `ahead` pieces from placing (0 = the current target). Returns null when that
+   * placement is beyond the window. This is the pro's real inputs, so the learner
+   * practises the exact key finesse, not a shortest-path substitute.
+   */
+  targetInputs(ahead = 0): InputStep[] | null {
+    const placed = this.placed + ahead;
+    if (placed >= this.windowLength) return null;
+    return this.track[this.window.start + placed].inputs;
   }
 
   /**
@@ -419,23 +450,4 @@ export class TrainingSession {
 
 function clamp(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, v));
-}
-
-/**
- * Insert a recorded garbage event's rows into the learner's board, mirroring
- * the engine's own tank loop (same chunk grouping via isBeginning/isEnd).
- */
-function insertGarbageRows(learner: Engine, event: GarbageEvent): void {
-  const rows = event.rows;
-  for (let i = 0; i < rows.length; i++) {
-    const g = rows[i];
-    learner.board.insertGarbage({
-      amount: g.amount,
-      size: g.size,
-      column: g.column,
-      bombs: learner.garbageQueue.options.bombs,
-      isBeginning: i === 0 || rows[i - 1].id !== g.id,
-      isEnd: i === rows.length - 1 || rows[i + 1].id !== g.id,
-    });
-  }
 }

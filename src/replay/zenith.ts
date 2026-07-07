@@ -39,8 +39,8 @@ export function detectDriftCap(track: readonly Placement[]): number | null {
 
 /**
  * Truncate a reconstruction to the placements before `cap`, recomputing the
- * piece/line/frame totals and dropping garbage that arrived at or after the
- * cap. The final engine is left as-is (nothing reads it past the track).
+ * piece/line/frame totals. The final engine is left as-is (nothing reads it
+ * past the track).
  */
 export function capReconstruction(
   result: ReconstructionResult,
@@ -54,6 +54,5 @@ export function capReconstruction(
     pieces: track.length,
     lines: track.reduce((sum, p) => sum + p.clears, 0),
     frame: last?.frame ?? 0,
-    garbage: result.garbage.filter((g) => g.beforePiece < cap),
   };
 }

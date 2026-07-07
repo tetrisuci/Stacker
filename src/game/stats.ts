@@ -18,14 +18,31 @@ export interface GameStats {
   attack: number;
   /** Attack per minute. */
   apm: number;
+  /** Gameplay keys pressed. */
+  keys: number;
+  /** Keys per piece. */
+  kpp: number;
 }
 
 /**
  * Compute live stats from a snapshot. Rates are 0 until at least one frame has
  * elapsed (avoids a divide-by-zero spike on the first frame).
+ *
+ * `keys` comes from the KeyboardSource's press counter, not the snapshot —
+ * the engine only ever sees buffered transitions, never raw press counts —
+ * so the caller passes it in alongside the snapshot.
+ *
+ * `piecesOverride` replaces the snapshot's piece count (PPS and KPP derive
+ * from it too). The engine's own `stats.pieces` drifts across undo/redo
+ * snapshot restores, so during a session the session-owned placement counter
+ * is the authoritative count.
  */
-export function computeStats(snapshot: EngineSnapshot): GameStats {
-  const pieces = snapshot.stats.pieces ?? 0;
+export function computeStats(
+  snapshot: EngineSnapshot,
+  keys = 0,
+  piecesOverride?: number,
+): GameStats {
+  const pieces = piecesOverride ?? snapshot.stats.pieces ?? 0;
   // "Attack" = garbage generated this game. In solo play `sent` stays 0 (no
   // opponent to confirm), so use the attack the engine credited on clears.
   const attack = snapshot.stats.garbage?.attack ?? 0;
@@ -35,6 +52,7 @@ export function computeStats(snapshot: EngineSnapshot): GameStats {
 
   const pps = seconds > 0 ? pieces / seconds : 0;
   const apm = seconds > 0 ? (attack / seconds) * 60 : 0;
+  const kpp = pieces > 0 ? keys / pieces : 0;
 
-  return { pieces, pps, attack, apm };
+  return { pieces, pps, attack, apm, keys, kpp };
 }

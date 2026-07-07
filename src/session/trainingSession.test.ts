@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseReplay } from "../replay/parse";
+import { parseMatch, buildGameReplay } from "../replay/ttrm";
 import { reconstructReplay } from "../replay/reconstruct";
 import { buildProEngine } from "../replay/proEngine";
 import { TrainingSession } from "./trainingSession";
@@ -15,6 +16,34 @@ function loadTrack() {
   const replay = parsed.replay;
   const result = reconstructReplay(replay);
   return { replay, result };
+}
+
+/** Load round 1, player 0 of the bundled Tetra League match (has garbage). */
+function loadMatchTrack() {
+  const res = parseMatch(readFileSync(dataPath("promooooooo_tr.ttrm"), "utf8"));
+  if (!res.ok) throw new Error("match parse failed");
+  const built = buildGameReplay(res.match, 0, 0);
+  if (!built.ok) throw new Error("game build failed");
+  const result = reconstructReplay(built.replay);
+  return { replay: built.replay, result };
+}
+
+const countGarbageRows = (board: readonly unknown[][]): number =>
+  board.filter((row) =>
+    row.some((c) => !!c && ((c as { mino?: string }).mino ?? c) === "gb"),
+  ).length;
+
+/**
+ * Place a piece the way the live trainer does: hard-drop, settle, then deliver
+ * the next piece's incoming garbage — the same compare-then-deliver order the
+ * bootstrap lock handler uses (garbage for piece i+1 lands only after piece i is
+ * placed, so piece i's board stays garbage-consistent with the pro at compare).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function placeAndDeliver(learner: any, session: TrainingSession): void {
+  learner.press("hardDrop");
+  learner.tick([]);
+  session.deliverIncomingGarbage(learner);
 }
 
 describe("TrainingSession", () => {
@@ -40,37 +69,16 @@ describe("TrainingSession", () => {
     void session;
   });
 
-  it("starts both boards empty when the window starts at piece 0", () => {
+  it("starts the board empty when the window starts at piece 0", () => {
     const { replay, result } = loadTrack();
     const learner = buildProEngine(replay);
     const session = TrainingSession.start(result.track, { start: 0, end: 10 }, learner);
-    // No pieces placed yet -> the learner board and the pro board are both empty.
+    // No pieces placed yet -> the learner board is empty.
     expect(learner.snapshot().board.flat().filter(Boolean).length).toBe(0);
-    expect(
-      session.proSnapshotFor().board.flat().filter(Boolean).length,
-    ).toBe(0);
+    void session;
   });
 
-  it("advances the pro board in lockstep with the learner's placements", () => {
-    const { replay, result } = loadTrack();
-    const learner = buildProEngine(replay);
-    const session = TrainingSession.start(result.track, { start: 10, end: 30 }, learner);
-
-    // Before any placement the pro board shows the board before piece 10 (empty
-    // window), so its last-placed index sits at the window start.
-    expect(session.proIndexFor()).toBe(10);
-    learner.press("hardDrop");
-    learner.tick([]);
-    expect(session.learnerPiecesPlaced()).toBe(1);
-    // After one placement the pro board shows the board with piece 10 placed.
-    expect(session.proIndexFor()).toBe(10);
-    // And the board it renders now includes that piece (before piece 11).
-    expect(
-      session.proSnapshotFor().board.flat().filter(Boolean).length,
-    ).toBe(result.track[10].snapshot.board.flat().filter(Boolean).length);
-  });
-
-  it("reports piece index and elapsed time for both boards", () => {
+  it("reports piece index and elapsed time for the learner", () => {
     const { replay, result } = loadTrack();
     const learner = buildProEngine(replay);
     const session = TrainingSession.start(result.track, { start: 5, end: 15 }, learner);
@@ -79,6 +87,7 @@ describe("TrainingSession", () => {
     expect(ls0.pieceInWindow).toBe(0);
     expect(ls0.windowLength).toBe(11);
     expect(ls0.elapsedSec).toBe(0);
+    expect(ls0.absoluteIndex).toBe(5);
 
     // Advance a few learner frames + a placement.
     for (let i = 0; i < 30; i++) learner.tick([]);
@@ -86,28 +95,11 @@ describe("TrainingSession", () => {
     learner.tick([]);
     const ls1 = session.learnerStatus(learner);
     expect(ls1.pieceInWindow).toBe(1);
+    expect(ls1.absoluteIndex).toBe(6);
     expect(ls1.elapsedSec).toBeGreaterThan(0);
-
-    const ps = session.proStatus();
-    expect(ps.pieceInWindow).toBe(1);
-    expect(ps.absoluteIndex).toBe(6);
-    // The pro clock is absolute replay time: piece 6's replay timestamp, not
-    // time since the window start.
-    expect(ps.elapsedSec).toBeCloseTo(result.track[6].frame / 60, 6);
-    expect(session.proStatus().elapsedSec).toBeGreaterThan(0);
   });
 
-  it("starts the pro clock at the start piece's replay time", () => {
-    const { replay, result } = loadTrack();
-    const learner = buildProEngine(replay);
-    const session = TrainingSession.start(result.track, { start: 20, end: 40 }, learner);
-    expect(session.proStatus().elapsedSec).toBeCloseTo(
-      result.track[20].frame / 60,
-      6,
-    );
-  });
-
-  it("clamps the pro board to the window end and marks done", () => {
+  it("clamps the learner status to the window end and marks done", () => {
     const { replay, result } = loadTrack();
     const learner = buildProEngine(replay);
     const session = TrainingSession.start(result.track, { start: 0, end: 3 }, learner);
@@ -117,9 +109,9 @@ describe("TrainingSession", () => {
       learner.press("hardDrop");
       learner.tick([]);
     }
-    expect(session.proIndexFor()).toBe(3); // clamped to end
-    expect(session.learnerStatus(learner).done).toBe(true);
-    expect(session.proStatus().done).toBe(true);
+    const ls = session.learnerStatus(learner);
+    expect(ls.pieceInWindow).toBe(4); // clamped to window length
+    expect(ls.done).toBe(true);
   });
 
   it("preserves a learner handling override across seeding", () => {
@@ -143,143 +135,6 @@ describe("TrainingSession", () => {
     );
     expect(session.window.start).toBe(0);
     expect(session.window.end).toBe(last);
-  });
-});
-
-describe("TrainingSession garbage mirroring", () => {
-  /** Number of garbage cells on the learner's board (each row has 9). */
-  const garbageCells = (learner: ReturnType<typeof buildProEngine>) =>
-    learner
-      .snapshot()
-      .board.flat()
-      .filter((t) => (t as { mino?: string } | null)?.mino === "gb").length;
-
-  const garbageAt = (beforePiece: number, amount: number, column = 4) => ({
-    beforePiece,
-    amount,
-    rows: [{ column, amount, size: 1, id: beforePiece }],
-  });
-
-  it("inserts the pro's garbage rows at the same piece boundary", () => {
-    const { replay, result } = loadTrack();
-    const learner = buildProEngine(replay);
-    // Synthetic schedule: 4 rows under piece 12, 2 more under piece 14.
-    const garbage = [garbageAt(12, 4), garbageAt(14, 2)];
-    const session = TrainingSession.start(
-      result.track,
-      { start: 10, end: 20 },
-      learner,
-      garbage,
-    );
-
-    // At the window start (piece 10 falling) nothing is due yet.
-    session.mirrorGarbage(learner);
-    expect(garbageCells(learner)).toBe(0);
-
-    // Place 2 pieces -> piece 12 falling -> the first rows are on the board.
-    learner.press("hardDrop");
-    learner.tick([]);
-    learner.press("hardDrop");
-    learner.tick([]);
-    session.mirrorGarbage(learner);
-    expect(garbageCells(learner)).toBe(4 * 9);
-
-    // Place 2 more -> piece 14 falling -> the second rows (cumulative 6).
-    learner.press("hardDrop");
-    learner.tick([]);
-    learner.press("hardDrop");
-    learner.tick([]);
-    session.mirrorGarbage(learner);
-    expect(garbageCells(learner)).toBe(6 * 9);
-  });
-
-  it("puts the hole in the recorded column", () => {
-    const { replay, result } = loadTrack();
-    const learner = buildProEngine(replay);
-    const session = TrainingSession.start(
-      result.track,
-      { start: 10, end: 20 },
-      learner,
-      [garbageAt(11, 2, 7)],
-    );
-    learner.press("hardDrop");
-    learner.tick([]);
-    session.mirrorGarbage(learner);
-    const board = learner.snapshot().board;
-    for (const y of [0, 1]) {
-      for (let x = 0; x < 10; x++) {
-        const cell = board[y][x] as { mino?: string } | null;
-        if (x === 7) expect(cell).toBeNull();
-        else expect(cell?.mino).toBe("gb");
-      }
-    }
-  });
-
-  it("does not double-insert garbage across repeated frames", () => {
-    const { replay, result } = loadTrack();
-    const learner = buildProEngine(replay);
-    const session = TrainingSession.start(
-      result.track,
-      { start: 0, end: 10 },
-      learner,
-      [garbageAt(1, 3)],
-    );
-    learner.press("hardDrop");
-    learner.tick([]);
-    session.mirrorGarbage(learner);
-    session.mirrorGarbage(learner);
-    session.mirrorGarbage(learner);
-    expect(garbageCells(learner)).toBe(3 * 9); // exactly once, not thrice
-  });
-
-  it("ignores garbage scheduled outside the window", () => {
-    const { replay, result } = loadTrack();
-    const learner = buildProEngine(replay);
-    const session = TrainingSession.start(
-      result.track,
-      { start: 10, end: 20 },
-      learner,
-      [
-        garbageAt(5, 4), // before window: already part of the seed board
-        garbageAt(30, 4), // after window: never needed
-      ],
-    );
-    // Advance well past the window; out-of-window garbage never arrives.
-    for (let i = 0; i < 15; i++) {
-      learner.press("hardDrop");
-      learner.tick([]);
-      session.mirrorGarbage(learner);
-    }
-    expect(garbageCells(learner)).toBe(0);
-  });
-
-  it("re-inserts garbage that an undo rolled back", () => {
-    const { replay, result } = loadTrack();
-    const learner = buildProEngine(replay, { can_undo: true, can_retry: true });
-    const session = TrainingSession.start(
-      result.track,
-      { start: 10, end: 20 },
-      learner,
-      [garbageAt(12, 2)],
-    );
-    learner.press("hardDrop");
-    learner.tick([]);
-    learner.press("hardDrop");
-    learner.tick([]);
-    session.mirrorGarbage(learner);
-    expect(garbageCells(learner)).toBe(2 * 9);
-
-    // Undo piece 11: the restored spawn snapshot predates the insertion.
-    session.undo(learner);
-    session.resyncGarbage();
-    session.mirrorGarbage(learner);
-    expect(garbageCells(learner)).toBe(0);
-
-    // Re-place it: the rows come back at the same boundary.
-    learner.press("hardDrop");
-    learner.tick([]);
-    session.mirrorGarbage(learner);
-    expect(garbageCells(learner)).toBe(2 * 9);
   });
 });
 
@@ -319,11 +174,10 @@ describe("TrainingSession undo/redo", () => {
     expect(filled(learner)).toBe(twoDrops);
   });
 
-  it("keeps the piece count and pro board in sync through undo/redo", () => {
+  it("keeps the piece count in sync through undo/redo", () => {
     const { learner, session } = sessionWithUndo();
-    const start = session.window.start; // 10
 
-    // Each drop advances placed count and pro index by exactly one.
+    // Each drop advances the placed count by exactly one.
     learner.press("hardDrop");
     learner.tick([]);
     learner.press("hardDrop");
@@ -331,29 +185,22 @@ describe("TrainingSession undo/redo", () => {
     learner.press("hardDrop");
     learner.tick([]);
     expect(session.learnerPiecesPlaced()).toBe(3);
-    // proIndexFor is the pro board's *last-placed* index, one behind the piece
-    // being worked toward: after placing 3 pieces it shows piece start+2.
-    expect(session.proIndexFor()).toBe(start + 2);
 
-    // Undo removes exactly one piece from the count/index each time.
+    // Undo removes exactly one piece from the count each time.
     session.undo(learner);
     expect(session.learnerPiecesPlaced()).toBe(2);
-    expect(session.proIndexFor()).toBe(start + 1);
 
     session.undo(learner);
     expect(session.learnerPiecesPlaced()).toBe(1);
-    expect(session.proIndexFor()).toBe(start + 0);
 
     // Redo restores exactly one.
     session.redo(learner);
     expect(session.learnerPiecesPlaced()).toBe(2);
-    expect(session.proIndexFor()).toBe(start + 1);
 
     // A fresh drop after redo continues cleanly.
     learner.press("hardDrop");
     learner.tick([]);
     expect(session.learnerPiecesPlaced()).toBe(3);
-    expect(session.proIndexFor()).toBe(start + 2);
   });
 
   it("keeps counting past the engine's undo-stack cap", () => {
@@ -370,7 +217,6 @@ describe("TrainingSession undo/redo", () => {
     learner.practice?.undo.shift();
     learner.practice?.undo.shift();
     expect(session.learnerPiecesPlaced()).toBe(3);
-    expect(session.proIndexFor()).toBe(session.window.start + 2);
   });
 
   it("does not crash when undoing past the seeded window start", () => {
@@ -675,5 +521,177 @@ describe("TrainingSession stack-like-the-pro comparison", () => {
     // but the shape is correct.
     expect(typeof summary.holesDelta).toBe("number");
     expect(typeof summary.bumpinessDelta).toBe("number");
+  });
+
+  // ---- multiplayer garbage injection ----
+
+  it("seeds a window's first piece with the garbage the pro faced", () => {
+    // If the window's first piece arrived with garbage already on the pro's
+    // board (tanked while placing it), the learner — seeded from the board
+    // *before* it — must get that garbage too, or the target ghost floats above
+    // an empty base. Piece 32 tanked 4 rows; a window starting there seeds them.
+    const { replay, result } = loadMatchTrack();
+    expect(result.track[32].garbage).toEqual([{ column: 9, amount: 4, size: 1 }]);
+
+    const learner = buildProEngine(replay, { can_undo: true, can_retry: true });
+    TrainingSession.start(result.track, { start: 32, end: 40 }, learner);
+    learner.tick([]);
+    expect(countGarbageRows(learner.snapshot().board)).toBe(4);
+  });
+
+  it("delivers garbage mid-window when the pro received it between pieces", () => {
+    // The real bug: garbage that arrives *within* a window. Window [30,40] seeds
+    // from track[29] (no garbage). Pieces 30, 31 have none; piece 32 tanked 4
+    // rows. After the learner places 30 and 31, facing piece 32, those 4 rows
+    // must appear — so the learner builds on the same terrain as the ghost.
+    const { replay, result } = loadMatchTrack();
+    const learner = buildProEngine(replay, { can_undo: true, can_retry: true });
+    const session = TrainingSession.start(
+      result.track,
+      { start: 30, end: 40 },
+      learner,
+    );
+    learner.tick([]);
+    expect(countGarbageRows(learner.snapshot().board)).toBe(0);
+
+    placeAndDeliver(learner, session); // placed piece 30, now facing 31
+    expect(countGarbageRows(learner.snapshot().board)).toBe(0);
+
+    placeAndDeliver(learner, session); // placed piece 31, facing 32 -> its 4 rows
+    expect(session.learnerPiecesPlaced()).toBe(2);
+    expect(countGarbageRows(learner.snapshot().board)).toBe(4);
+  });
+
+  it("does not double-inject garbage across an undo/redo of the boundary", () => {
+    // The lock event fires again when a piece is redone; garbage for a given
+    // piece must be injected only once, or a redo would stack duplicate rows.
+    const { replay, result } = loadMatchTrack();
+    const learner = buildProEngine(replay, { can_undo: true, can_retry: true });
+    const session = TrainingSession.start(
+      result.track,
+      { start: 30, end: 40 },
+      learner,
+    );
+    learner.tick([]);
+    placeAndDeliver(learner, session);
+    placeAndDeliver(learner, session); // facing 32, 4 rows injected
+    expect(countGarbageRows(learner.snapshot().board)).toBe(4);
+
+    // Undo back past the boundary, then redo forward across it again.
+    session.undo(learner);
+    session.redo(learner);
+    // Still exactly 4 rows — not 8.
+    expect(countGarbageRows(learner.snapshot().board)).toBe(4);
+  });
+
+  it("re-injects garbage after undoing across the boundary and re-placing", () => {
+    // The reported bug: undo back over the garbage boundary (which removes the
+    // rows), then place the previous piece *fresh* rather than redoing. This
+    // clears the redo stack, so the boundary piece is reached by a genuine new
+    // placement — and its garbage must be laid down again. A once-per-index
+    // "already injected" guard would wrongly skip it, leaving the board (and the
+    // target ghost) garbage-free.
+    const { replay, result } = loadMatchTrack();
+    const learner = buildProEngine(replay, { can_undo: true, can_retry: true });
+    const session = TrainingSession.start(
+      result.track,
+      { start: 30, end: 40 },
+      learner,
+    );
+    learner.tick([]);
+    placeAndDeliver(learner, session);
+    placeAndDeliver(learner, session); // facing 32 -> 4 rows
+    expect(countGarbageRows(learner.snapshot().board)).toBe(4);
+
+    // Undo to before the boundary: the rows come off with the board restore.
+    session.undo(learner);
+    expect(countGarbageRows(learner.snapshot().board)).toBe(0);
+
+    // Re-place that piece somewhere else (a fresh placement, not a redo), which
+    // re-crosses into the boundary piece — the 4 rows must return.
+    learner.press("moveLeft");
+    for (let i = 0; i < 5; i++) learner.tick([]);
+    placeAndDeliver(learner, session);
+    expect(session.learnerPiecesPlaced()).toBe(2);
+    expect(countGarbageRows(learner.snapshot().board)).toBe(4);
+  });
+
+  it("re-injects garbage after undoing to the window start and replaying", () => {
+    // Undo all the way back to the seed, then play forward again: the mid-window
+    // garbage must reappear at the same piece (the watermark fully rewinds).
+    const { replay, result } = loadMatchTrack();
+    const learner = buildProEngine(replay, { can_undo: true, can_retry: true });
+    const session = TrainingSession.start(
+      result.track,
+      { start: 30, end: 40 },
+      learner,
+    );
+    learner.tick([]);
+    for (let i = 0; i < 3; i++) placeAndDeliver(learner, session);
+    expect(countGarbageRows(learner.snapshot().board)).toBe(4);
+
+    while (session.learnerPiecesPlaced() > 0) session.undo(learner);
+    expect(countGarbageRows(learner.snapshot().board)).toBe(0);
+
+    for (let i = 0; i < 2; i++) placeAndDeliver(learner, session);
+    expect(countGarbageRows(learner.snapshot().board)).toBe(4);
+  });
+
+  it("keeps a garbage-free piece's board matching the pro (delivery is deferred)", () => {
+    // The comparison bug: delivering piece i+1's garbage on piece i's lock put
+    // the rows on the board before piece i was compared, so a garbage-free piece
+    // (e.g. 31) spuriously mismatched the pro's garbage-free board. Delivery must
+    // happen only *after* the compare. Here: after placing piece 31 like the pro
+    // and delivering, the board has the pro's incoming garbage — but the compare
+    // for 31 already ran against a 0-garbage board (mirrored by the ordering in
+    // placeAndDeliver, which delivers last).
+    const { replay, result } = loadMatchTrack();
+    expect(countGarbageRows(result.track[31].snapshot.board)).toBe(0);
+    expect(countGarbageRows(result.track[32].snapshot.board)).toBe(4);
+
+    const learner = buildProEngine(replay, { can_undo: true, can_retry: true });
+    const session = TrainingSession.start(
+      result.track,
+      { start: 30, end: 40 },
+      learner,
+    );
+    learner.tick([]);
+    placeAndDeliver(learner, session); // piece 30
+    // Right after placing piece 31 (before delivery) the board must still be
+    // garbage-free — matching pro track[31]. Assert at that exact instant.
+    learner.press("hardDrop");
+    learner.tick([]);
+    expect(countGarbageRows(learner.snapshot().board)).toBe(0);
+    // Now deliver: the next piece (32) gets its 4 rows.
+    session.deliverIncomingGarbage(learner);
+    expect(countGarbageRows(learner.snapshot().board)).toBe(4);
+  });
+
+  it("clears the inherited garbage queue so garbage isn't delivered twice", () => {
+    // The pro's seed snapshot carries a pending garbage queue (garbage the engine
+    // would tank on its own as frames advance). If left in place, near an arrival
+    // it tanks natively AND our injection fires — 8 rows instead of 4. The session
+    // clears the queue at seed so our per-piece injection is the only source.
+    const { replay, result } = loadMatchTrack();
+    const learner = buildProEngine(replay, { can_undo: true, can_retry: true });
+    const session = TrainingSession.start(
+      result.track,
+      { start: 31, end: 40 },
+      learner,
+    );
+    learner.tick([]);
+    // The inherited queue is emptied at seed.
+    const gq = (learner as unknown as { garbageQueue?: { queue?: unknown[] } })
+      .garbageQueue;
+    expect(gq?.queue?.length ?? 0).toBe(0);
+
+    // Place piece 31 and let MANY frames pass (as the RAF loop would) before
+    // delivering — the engine must NOT tank anything on its own, so after delivery
+    // there are exactly 4 rows (piece 32's arrival), never 8.
+    learner.press("hardDrop");
+    for (let i = 0; i < 60; i++) learner.tick([]);
+    expect(countGarbageRows(learner.snapshot().board)).toBe(0);
+    session.deliverIncomingGarbage(learner);
+    expect(countGarbageRows(learner.snapshot().board)).toBe(4);
   });
 });

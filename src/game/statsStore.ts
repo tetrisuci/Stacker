@@ -7,15 +7,24 @@ import type { GameStats } from "./stats";
 
 type Listener = () => void;
 
-const ZERO: GameStats = { pieces: 0, pps: 0, attack: 0, apm: 0 };
+const ZERO: GameStats = {
+  pieces: 0,
+  pps: 0,
+  attack: 0,
+  apm: 0,
+  keys: 0,
+  kpp: 0,
+};
 
 /** Round rates to the precision the UI shows, so tiny jitter doesn't re-render. */
 function displayEqual(a: GameStats, b: GameStats): boolean {
   return (
     a.pieces === b.pieces &&
     a.attack === b.attack &&
+    a.keys === b.keys &&
     a.pps.toFixed(2) === b.pps.toFixed(2) &&
-    a.apm.toFixed(2) === b.apm.toFixed(2)
+    a.apm.toFixed(2) === b.apm.toFixed(2) &&
+    a.kpp.toFixed(2) === b.kpp.toFixed(2)
   );
 }
 

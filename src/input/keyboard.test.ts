@@ -85,6 +85,23 @@ describe("KeyboardSource", () => {
       { type: "keydown", key: "hardDrop" },
     ]);
   });
+
+  it("counts gameplay keydowns only (the keys stat)", () => {
+    target.fire("keydown", "ArrowLeft");
+    target.fire("keyup", "ArrowLeft"); // releases don't count
+    target.fire("keydown", "ArrowLeft");
+    target.fire("keydown", "ArrowLeft", true); // auto-repeat doesn't count
+    target.fire("keydown", "Space");
+    target.fire("keydown", "KeyQ"); // unmapped doesn't count
+    target.fire("keydown", "Enter"); // app action (restart) doesn't count
+    expect(src.pressCount).toBe(3);
+
+    src.resetPressCount();
+    expect(src.pressCount).toBe(0);
+    target.fire("keyup", "Space");
+    target.fire("keydown", "Space");
+    expect(src.pressCount).toBe(1);
+  });
 });
 
 describe("KeyboardSource app actions (restart)", () => {

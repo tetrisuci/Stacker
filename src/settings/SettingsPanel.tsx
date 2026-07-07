@@ -26,65 +26,15 @@ const HANDLING_FIELDS: Array<{
 
 export function SettingsPanel({ store }: { store: SettingsStore }) {
   const settings = useSettings(store);
-  const [rebinding, setRebinding] = useState<ActionKey | null>(null);
-
-  // While rebinding, the next key press (anywhere) binds that action. We
-  // capture in the capture phase and stopPropagation so gameplay input never
-  // sees the rebinding keystroke.
-  const rebindingRef = useRef<ActionKey | null>(null);
-  rebindingRef.current = rebinding;
-
-  useEffect(() => {
-    if (!rebinding) return;
-    const isModifier = (code: string) => /^(Control|Shift|Alt|Meta)/.test(code);
-    let done = false;
-    const finish = (code: string) => {
-      if (done) return;
-      done = true;
-      store.rebind(code, rebinding);
-      setRebinding(null);
-    };
-    const onKeyDown = (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.code === "Escape") {
-        done = true;
-        setRebinding(null);
-        return;
-      }
-      // A non-modifier key binds immediately (with a Ctrl+ prefix if held, so
-      // Ctrl+Z becomes a combo).
-      if (!isModifier(e.code)) finish(comboCode(e));
-      // A modifier keydown is deferred: if it's released without another key, it
-      // binds on its own (below); if a real key follows, that combo wins.
-    };
-    const onKeyUp = (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      // Binding a lone modifier (e.g. Shift for hold): commit on its release.
-      if (isModifier(e.code)) finish(e.code);
-    };
-    // Capture phase, and on window, so we intercept before the game loop.
-    window.addEventListener("keydown", onKeyDown, true);
-    window.addEventListener("keyup", onKeyUp, true);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown, true);
-      window.removeEventListener("keyup", onKeyUp, true);
-    };
-  }, [rebinding, store]);
 
   return (
-    <>
     <aside className="settings">
       <div className="settings-header">
         <h2>Settings</h2>
         <button
           type="button"
           className="reset-btn"
-          onClick={() => {
-            setRebinding(null);
-            store.resetToDefaults();
-          }}
+          onClick={() => store.resetToDefaults()}
         >
           Reset to defaults
         </button>
@@ -186,7 +136,64 @@ export function SettingsPanel({ store }: { store: SettingsStore }) {
         )}
       </section>
     </aside>
+  );
+}
 
+/**
+ * Keybinding panel, split out from {@link SettingsPanel} so it can mount beside
+ * the board. Owns the rebinding capture: while listening, the next key press
+ * (anywhere) binds the chosen action.
+ */
+export function ControlsPanel({ store }: { store: SettingsStore }) {
+  const settings = useSettings(store);
+  const [rebinding, setRebinding] = useState<ActionKey | null>(null);
+
+  // While rebinding, the next key press (anywhere) binds that action. We
+  // capture in the capture phase and stopPropagation so gameplay input never
+  // sees the rebinding keystroke.
+  const rebindingRef = useRef<ActionKey | null>(null);
+  rebindingRef.current = rebinding;
+
+  useEffect(() => {
+    if (!rebinding) return;
+    const isModifier = (code: string) => /^(Control|Shift|Alt|Meta)/.test(code);
+    let done = false;
+    const finish = (code: string) => {
+      if (done) return;
+      done = true;
+      store.rebind(code, rebinding);
+      setRebinding(null);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.code === "Escape") {
+        done = true;
+        setRebinding(null);
+        return;
+      }
+      // A non-modifier key binds immediately (with a Ctrl+ prefix if held, so
+      // Ctrl+Z becomes a combo).
+      if (!isModifier(e.code)) finish(comboCode(e));
+      // A modifier keydown is deferred: if it's released without another key, it
+      // binds on its own (below); if a real key follows, that combo wins.
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      // Binding a lone modifier (e.g. Shift for hold): commit on its release.
+      if (isModifier(e.code)) finish(e.code);
+    };
+    // Capture phase, and on window, so we intercept before the game loop.
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+    };
+  }, [rebinding, store]);
+
+  return (
     <aside className="settings controls-panel">
       <div className="settings-header">
         <h2>Controls</h2>
@@ -215,7 +222,6 @@ export function SettingsPanel({ store }: { store: SettingsStore }) {
         );
       })}
     </aside>
-    </>
   );
 }
 

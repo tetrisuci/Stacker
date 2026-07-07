@@ -18,6 +18,12 @@ export function StatsPanel({ store }: { store: StatsStore }) {
         rate={`${stats.apm.toFixed(2)}/m`}
         rateLabel="APM"
       />
+      <StatRow
+        label="Keys"
+        value={String(stats.keys)}
+        rate={`${stats.kpp.toFixed(2)}/p`}
+        rateLabel="KPP"
+      />
     </div>
   );
 }

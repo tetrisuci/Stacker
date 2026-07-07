@@ -35,6 +35,9 @@ export class KeyboardSource {
   private held = new Set<string>();
   private buffer: InputTransition[] = [];
   private attached = false;
+  /** Gameplay keydowns since attach (or the last reset) — the "keys" stat.
+   * App actions and OS auto-repeat don't count, matching TETR.IO's counter. */
+  pressCount = 0;
 
   constructor(options: KeyboardSourceOptions = {}) {
     this.keymap = options.keymap ?? DEFAULT_KEYMAP;
@@ -66,6 +69,11 @@ export class KeyboardSource {
     this.keymap = keymap;
   }
 
+  /** Zero the press counter (a new game starts a new count). */
+  resetPressCount(): void {
+    this.pressCount = 0;
+  }
+
   /** Take and clear all buffered transitions (in press/release order). */
   drain(): InputTransition[] {
     if (this.buffer.length === 0) return [];
@@ -83,6 +91,7 @@ export class KeyboardSource {
     this.held.add(e.code);
     if (isPlayerKey(action)) {
       this.buffer.push({ type: "keydown", key: action });
+      this.pressCount++;
     } else {
       // App action (restart/undo/redo): fire immediately, never enters the engine.
       this.onAppKey?.(action);

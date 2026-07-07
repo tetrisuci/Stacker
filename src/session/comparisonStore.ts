@@ -20,6 +20,11 @@ export interface ComparisonState {
    * next piece, …).
    */
   lookahead: number;
+  /**
+   * When true, show the pro's actual key finesse for the current piece (from
+   * the replay) as a keycap strip below the board.
+   */
+  keyHints: boolean;
 }
 
 const EMPTY: ComparisonState = {
@@ -29,6 +34,7 @@ const EMPTY: ComparisonState = {
   lastMatch: null,
   summary: null,
   lookahead: 1,
+  keyHints: false,
 };
 
 type Listener = () => void;
@@ -50,8 +56,12 @@ export class ComparisonStore {
   }
 
   reset(): void {
-    // Preserve the look-ahead display preference across sessions.
-    this.state = { ...EMPTY, lookahead: this.state.lookahead };
+    // Preserve the display preferences (look-ahead, key hints) across sessions.
+    this.state = {
+      ...EMPTY,
+      lookahead: this.state.lookahead,
+      keyHints: this.state.keyHints,
+    };
     for (const l of this.listeners) l();
   }
 }

@@ -20,6 +20,8 @@ function placement(pieceIndex: number, clears: number): Placement {
     wasHold: false,
     spin: "none",
     clears,
+    inputs: [],
+    garbage: [],
     snapshot: {} as Placement["snapshot"],
   };
 }
@@ -60,17 +62,11 @@ describe("detectDriftCap", () => {
 describe("capReconstruction", () => {
   it("truncates the track and recomputes totals", () => {
     const track = trackWithClearsEvery(2, 10); // clears at odd indexes
-    const garbageAt = (beforePiece: number, amount: number) => ({
-      beforePiece,
-      amount,
-      rows: [{ column: 4, amount, size: 1, id: beforePiece }],
-    });
     const result = {
       track,
       pieces: 10,
       lines: 5,
       frame: 90,
-      garbage: [garbageAt(2, 1), garbageAt(7, 3)],
       engine: null as never,
     };
     const capped = capReconstruction(result, 6);
@@ -78,7 +74,6 @@ describe("capReconstruction", () => {
     expect(capped.pieces).toBe(6);
     expect(capped.lines).toBe(3); // clears at 1, 3, 5
     expect(capped.frame).toBe(50);
-    expect(capped.garbage).toEqual([garbageAt(2, 1)]);
   });
 });
 

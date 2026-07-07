@@ -19,7 +19,36 @@ function fakeSnapshot(
 describe("computeStats", () => {
   it("returns zeros before any time has elapsed", () => {
     const s = computeStats(fakeSnapshot(0, 0, 0));
-    expect(s).toEqual({ pieces: 0, pps: 0, attack: 0, apm: 0 });
+    expect(s).toEqual({
+      pieces: 0,
+      pps: 0,
+      attack: 0,
+      apm: 0,
+      keys: 0,
+      kpp: 0,
+    });
+  });
+
+  it("computes KPP from keys over pieces", () => {
+    // 21 keys over 9 pieces ≈ 2.33 kpp.
+    const s = computeStats(fakeSnapshot(9, 0, FPS), 21);
+    expect(s.keys).toBe(21);
+    expect(s.kpp).toBeCloseTo(21 / 9, 5);
+  });
+
+  it("prefers the session-owned pieces count when provided", () => {
+    // Engine says 95 (drifted across undo/redo restores); session says 101.
+    const s = computeStats(fakeSnapshot(95, 0, 10 * FPS), 234, 101);
+    expect(s.pieces).toBe(101);
+    expect(s.pps).toBeCloseTo(101 / 10, 5);
+    expect(s.kpp).toBeCloseTo(234 / 101, 5);
+  });
+
+  it("keeps KPP at 0 before the first placement", () => {
+    // Keys pressed while the first piece is still falling: no division by 0.
+    const s = computeStats(fakeSnapshot(0, 0, FPS), 4);
+    expect(s.keys).toBe(4);
+    expect(s.kpp).toBe(0);
   });
 
   it("computes PPS from pieces over elapsed seconds", () => {
@@ -64,31 +93,38 @@ describe("StatsStore", () => {
     let calls = 0;
     store.subscribe(() => calls++);
 
-    store.set({ pieces: 1, pps: 1.234, attack: 0, apm: 0 });
+    const base = { pieces: 1, attack: 0, apm: 0, keys: 0, kpp: 0 };
+    store.set({ ...base, pps: 1.234 });
     expect(calls).toBe(1);
 
     // A sub-0.01 PPS jitter should not re-render.
-    store.set({ pieces: 1, pps: 1.2349, attack: 0, apm: 0 });
+    store.set({ ...base, pps: 1.2349 });
     expect(calls).toBe(1);
 
     // A change past the shown precision does notify.
-    store.set({ pieces: 1, pps: 1.24, attack: 0, apm: 0 });
+    store.set({ ...base, pps: 1.24 });
     expect(calls).toBe(2);
 
     // A pieces change notifies.
-    store.set({ pieces: 2, pps: 1.24, attack: 0, apm: 0 });
+    store.set({ ...base, pieces: 2, pps: 1.24 });
     expect(calls).toBe(3);
+
+    // A key press notifies.
+    store.set({ ...base, pieces: 2, pps: 1.24, keys: 1, kpp: 0.5 });
+    expect(calls).toBe(4);
   });
 
   it("reset returns to zeros", () => {
     const store = new StatsStore();
-    store.set({ pieces: 5, pps: 3, attack: 2, apm: 40 });
+    store.set({ pieces: 5, pps: 3, attack: 2, apm: 40, keys: 12, kpp: 2.4 });
     store.reset();
     expect(store.getSnapshot()).toEqual({
       pieces: 0,
       pps: 0,
       attack: 0,
       apm: 0,
+      keys: 0,
+      kpp: 0,
     });
   });
 });

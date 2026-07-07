@@ -39,6 +39,8 @@ export const DEFAULT_READY_OPTIONS: GameTypes.ReadyOptions = {
   garbagetargetbonus: "none",
   garbageblocking: "combo blocking",
   garbagespecialbonus: false,
+  // Solo modes (40L/Blitz/Zenith) never receive garbage, so passthrough is inert;
+  // "zero" is the standard singleplayer default.
   passthrough: "zero",
   openerphase: 0,
   roundmode: "down",
