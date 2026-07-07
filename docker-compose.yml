@@ -11,7 +11,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stacker}
       POSTGRES_DB: ${POSTGRES_DB:-stacker}
     ports:
-      - "5432:5432"
+      # Loopback-only: reachable from the host (psql, migrations) and, over the
+      # compose network, by the api — but NOT from the public internet. A public
+      # bind here would expose Postgres to the world (see also UFW).
+      - "127.0.0.1:5432:5432"
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
@@ -32,7 +35,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stacker}
       POSTGRES_DB: stacker_test
     ports:
-      - "5433:5432"
+      # Loopback-only (see db). Test DB must never be internet-reachable.
+      - "127.0.0.1:5433:5432"
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:
@@ -49,8 +53,11 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-stacker}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-stacker-secret-key}
     ports:
-      - "9000:9000" # S3 API
-      - "9001:9001" # web console
+      # Loopback-only: the api reaches MinIO in-network as minio:9000, so the S3
+      # API needs no public bind; the console (9001) is admin-only. Publishing
+      # either to 0.0.0.0 exposes object storage + its admin console publicly.
+      - "127.0.0.1:9000:9000" # S3 API
+      - "127.0.0.1:9001:9001" # web console
     volumes:
       - minio-data:/data
     healthcheck:
@@ -97,7 +104,9 @@ services:
     env_file:
       - .env
     ports:
-      - "8000:8000"
+      # Loopback-only: nginx terminates TLS and proxies to 127.0.0.1:8000. A
+      # public bind would serve the API over plain HTTP, bypassing nginx/TLS.
+      - "127.0.0.1:8000:8000"
     volumes:
       # Bind-mount the source for hot reload; deps live in the image.
       - ./server:/app

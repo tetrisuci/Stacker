@@ -8,6 +8,7 @@ re-uploading), then JSON parse — which itself rejects multiplayer *shapes*
 
 import hashlib
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -40,6 +41,21 @@ router = APIRouter(prefix="/replays", tags=["replays"])
 
 DbSession = Annotated[Session, Depends(get_db)]
 StorageDep = Annotated[Storage, Depends(get_storage)]
+
+
+def _content_disposition(filename: str) -> str:
+    """Build a safe `attachment` Content-Disposition for a user-supplied
+    filename. The stored filename is attacker-controlled (it comes straight
+    off the upload), so it must never be interpolated raw into the header:
+    a `"` would break out of the quoted `filename="..."` value and inject
+    extra parameters. We emit an ASCII-sanitized legacy `filename=` (quotes,
+    backslashes, and control chars stripped) plus an RFC 5987 `filename*=`
+    with the full UTF-8 name percent-encoded for modern browsers."""
+    ascii_name = "".join(
+        c for c in filename if c.isprintable() and c not in '"\\'
+    ).encode("ascii", "ignore").decode() or "replay.ttr"
+    encoded = quote(filename, safe="")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded}"
 
 
 @router.post("", status_code=201, response_model=ReplayOut)
@@ -188,7 +204,5 @@ def get_replay_file(replay_id: str, db: DbSession, storage: StorageDep):
     return StreamingResponse(
         chunks,
         media_type="application/json",
-        headers={
-            "Content-Disposition": f'attachment; filename="{replay.filename}"'
-        },
+        headers={"Content-Disposition": _content_disposition(replay.filename)},
     )
